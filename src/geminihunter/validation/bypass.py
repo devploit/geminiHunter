@@ -396,7 +396,9 @@ class BypassEngine:
                         attempt.method, url, timeout=BYPASS_TIMEOUT, **kwargs
                     )
 
-                    if resp.status_code == 200:
+                    # 200 = direct success, 429 = key accepted but rate-limited
+                    # Both confirm the bypass works (original was 403)
+                    if resp.status_code in (200, 429):
                         winner.append(attempt)
                         found.set()
 

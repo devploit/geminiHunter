@@ -63,7 +63,7 @@ class KeyValidator:
                     key.key,
                     key.target_domain,
                     self.client,
-                    concurrency=min(5, self.config.concurrency),
+                    concurrency=10,
                 )
                 if bypass_result:
                     return ValidatedKey(
