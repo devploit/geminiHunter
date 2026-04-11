@@ -50,6 +50,7 @@ class BypassAttempt:
             api_version=self.api_version,
             endpoint=self.endpoint,
             method=self.method,
+            body=self.body,
             curl_command="",  # Filled later with key
         )
 
@@ -378,7 +379,7 @@ class BypassEngine:
         attempts = self.generate_all_attempts(key, target_domain)
         sem = asyncio.Semaphore(concurrency)
         found: asyncio.Event = asyncio.Event()
-        winner: list[BypassAttempt] = []  # mutable container for result
+        winner: list[tuple[BypassAttempt, int]] = []  # (attempt, status_code)
 
         async def try_attempt(attempt: BypassAttempt) -> None:
             if found.is_set():
@@ -399,7 +400,7 @@ class BypassEngine:
                     # 200 = direct success, 429 = key accepted but rate-limited
                     # Both confirm the bypass works (original was 403)
                     if resp.status_code in (200, 429):
-                        winner.append(attempt)
+                        winner.append((attempt, resp.status_code))
                         found.set()
 
                 except (httpx.HTTPError, Exception):
@@ -426,8 +427,10 @@ class BypassEngine:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         if winner:
-            detail = winner[0].to_bypass_detail()
-            detail.curl_command = winner[0].to_curl(key)
+            attempt, status_code = winner[0]
+            detail = attempt.to_bypass_detail()
+            detail.curl_command = attempt.to_curl(key)
+            detail.bypass_status_code = status_code
             return detail
 
         return None

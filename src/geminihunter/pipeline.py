@@ -46,24 +46,35 @@ class Pipeline:
 
     async def execute(self) -> ScanResult:
         start = time.monotonic()
+        timings: dict[str, float] = {}
 
         if self.config.is_key_mode:
             extracted = self._build_keys_from_input()
             sources_crawled = 0
         else:
+            t0 = time.monotonic()
             sources, sources_crawled = await self._discover()
+            timings["discovery"] = round(time.monotonic() - t0, 2)
+
+            t0 = time.monotonic()
             extracted = self._extract(sources)
+            timings["extraction"] = round(time.monotonic() - t0, 2)
 
         if not extracted:
             _status(self.config, "  [dim]No API keys found.[/dim]")
-            return self._build_result([], [], sources_crawled, start)
+            return self._build_result([], [], sources_crawled, start, timings)
 
         _status(self.config, f"  [green]+[/green] Found [bold]{len(extracted)}[/bold] unique key(s)\n")
 
+        t0 = time.monotonic()
         validated = await self._validate(extracted)
+        timings["validation"] = round(time.monotonic() - t0, 2)
 
         working = [k for k in validated if k.status in (KeyStatus.VALID, KeyStatus.BYPASSED)]
+
+        t0 = time.monotonic()
         intel = await self._gather_intel(working) if working else []
+        timings["intelligence"] = round(time.monotonic() - t0, 2)
 
         # Add non-working keys to results for completeness
         non_working = [
@@ -79,11 +90,12 @@ class Pipeline:
         ]
         all_results = intel + non_working
 
-        if self.config.evidence:
+        # Always generate curls for JSON mode, or when --evidence is set
+        if self.config.evidence or self.config.json_mode:
             for r in all_results:
                 r.curl_commands = generate_curl_commands(r)
 
-        result = self._build_result(all_results, validated, sources_crawled, start)
+        result = self._build_result(all_results, validated, sources_crawled, start, timings)
         self._render(result)
         return result
 
@@ -210,8 +222,25 @@ class Pipeline:
             if wp_sources:
                 _status(self.config, f"    [dim]+{len(wp_sources)} from webpack[/dim]")
 
-        _status(self.config, f"  [green]+[/green] Total: [bold]{len(all_sources)}[/bold] sources\n")
-        return all_sources, len(all_sources)
+        # Deduplicate sources by URL path (same JS served from different subdomains)
+        before_dedup = len(all_sources)
+        seen_paths: set[str] = set()
+        unique_sources: list[DiscoveredSource] = []
+        for s in all_sources:
+            # Normalize: strip scheme+host, keep path
+            from urllib.parse import urlparse
+
+            path = urlparse(s.url).path if s.url.startswith("http") else s.url
+            if path not in seen_paths:
+                seen_paths.add(path)
+                unique_sources.append(s)
+
+        deduped = before_dedup - len(unique_sources)
+        if deduped:
+            _status(self.config, f"    [dim]-{deduped} duplicate sources removed[/dim]")
+
+        _status(self.config, f"  [green]+[/green] Total: [bold]{len(unique_sources)}[/bold] unique sources\n")
+        return unique_sources, before_dedup
 
     def _extract(self, sources: list[DiscoveredSource]) -> list[ExtractedKey]:
         from concurrent.futures import ThreadPoolExecutor
@@ -299,6 +328,7 @@ class Pipeline:
         validated: list[ValidatedKey],
         sources_crawled: int,
         start: float,
+        timings: dict[str, float] | None = None,
     ) -> ScanResult:
         return ScanResult(
             targets_scanned=self.config.targets or ["direct_key_check"],
@@ -309,6 +339,7 @@ class Pipeline:
             keys_forbidden=sum(1 for r in results if r.status == KeyStatus.FORBIDDEN),
             keys_invalid=sum(1 for r in results if r.status == KeyStatus.INVALID),
             duration_seconds=round(time.monotonic() - start, 2),
+            phase_timings=timings or {},
             results=results,
         )
 

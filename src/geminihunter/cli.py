@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import click
@@ -12,6 +13,27 @@ from geminihunter.config import Config
 from geminihunter.pipeline import Pipeline
 
 console = Console(stderr=True)
+
+# --- Config file loader ---
+
+CONFIG_FILENAMES = [".geminihunterrc", ".geminihunter.toml"]
+CONFIG_SEARCH = [os.getcwd(), os.path.expanduser("~")]
+
+
+def _load_config_file() -> dict:
+    """Load defaults from .geminihunterrc or .geminihunter.toml."""
+    for directory in CONFIG_SEARCH:
+        for name in CONFIG_FILENAMES:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                try:
+                    import tomllib
+
+                    with open(path, "rb") as f:
+                        return tomllib.load(f)
+                except Exception:
+                    return {}
+    return {}
 
 BANNER = r"""
                        _       _ _   _             _
@@ -181,6 +203,29 @@ def main(
     evidence,
 ):
     """Discover and validate Google Gemini API keys from web targets."""
+
+    # Apply config file defaults for options not explicitly set on CLI
+    file_cfg = _load_config_file()
+    ctx = click.get_current_context()
+
+    def _cfg(param_name: str, cli_val, toml_key: str | None = None):
+        """Return CLI value if explicitly set, otherwise config file value, otherwise CLI default."""
+        src = ctx.get_parameter_source(param_name)
+        if src != click.core.ParameterSource.DEFAULT:
+            return cli_val
+        return file_cfg.get(toml_key or param_name, cli_val)
+
+    depth = _cfg("depth", depth)
+    wayback = _cfg("wayback", wayback)
+    sourcemaps = _cfg("sourcemaps", sourcemaps)
+    bypass = _cfg("bypass", bypass)
+    proxy = _cfg("proxy", proxy)
+    rate_limit = _cfg("rate_limit", rate_limit, "rate-limit")
+    delay = _cfg("delay", delay)
+    timeout = _cfg("timeout", timeout)
+    concurrency = _cfg("concurrency", concurrency)
+    user_agent = _cfg("user_agent", user_agent, "user-agent")
+    evidence = _cfg("evidence", evidence)
 
     _setup_logging(verbose, quiet)
 

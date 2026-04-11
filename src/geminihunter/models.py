@@ -55,7 +55,9 @@ class BypassDetail(BaseModel):
     api_version: str = "v1beta"
     endpoint: str = "models"
     method: str = "GET"
+    body: str | None = None
     curl_command: str = ""
+    bypass_status_code: int = 200
 
 
 class ValidatedKey(BaseModel):
@@ -101,4 +103,5 @@ class ScanResult(BaseModel):
     keys_forbidden: int = 0
     keys_invalid: int = 0
     duration_seconds: float = 0.0
+    phase_timings: dict[str, float] = Field(default_factory=dict)
     results: list[KeyIntelligence] = Field(default_factory=list)
