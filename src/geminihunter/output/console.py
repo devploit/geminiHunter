@@ -13,48 +13,53 @@ console = Console(stderr=True)
 STATUS_STYLES = {
     KeyStatus.VALID: ("VALID", "bold green"),
     KeyStatus.BYPASSED: ("BYPASSED", "bold yellow"),
-    KeyStatus.FORBIDDEN: ("FORBIDDEN", "bold red"),
+    KeyStatus.FORBIDDEN: ("403", "red"),
     KeyStatus.INVALID: ("INVALID", "dim"),
-    KeyStatus.UNKNOWN: ("UNKNOWN", "dim red"),
+    KeyStatus.UNKNOWN: ("ERR", "dim red"),
 }
 
 
 def render_table(result: ScanResult, config: Config) -> str:
-    """Render scan results as a rich table to stderr and return summary string."""
-
+    """Render scan results as a rich table."""
     if not result.results:
-        console.print("[dim]No results to display.[/dim]")
+        console.print("  [dim]No results to display.[/dim]")
         return ""
 
-    # Summary panel
-    summary = (
-        f"[green]{result.keys_valid} valid[/green] | "
-        f"[yellow]{result.keys_bypassed} bypassed[/yellow] | "
-        f"[red]{result.keys_forbidden} forbidden[/red] | "
-        f"[dim]{result.keys_invalid} invalid[/dim] | "
-        f"[dim]{result.duration_seconds}s[/dim]"
+    # Summary line
+    console.print(
+        f"  [bold]Results[/bold]  "
+        f"[green]{result.keys_valid} valid[/green]  "
+        f"[yellow]{result.keys_bypassed} bypassed[/yellow]  "
+        f"[red]{result.keys_forbidden} forbidden[/red]  "
+        f"[dim]{result.keys_invalid} invalid[/dim]  "
+        f"[dim]({result.duration_seconds}s)[/dim]\n"
     )
-    console.print(Panel(summary, title="Scan Summary", border_style="blue"))
 
     # Results table
-    table = Table(show_header=True, header_style="bold", border_style="dim")
-    table.add_column("#", style="dim", width=3)
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        border_style="dim",
+        pad_edge=False,
+        box=None,
+        padding=(0, 2),
+    )
+    table.add_column("Status", justify="center", width=10)
     table.add_column("Key", style="cyan", no_wrap=True)
-    table.add_column("Status", justify="center")
     table.add_column("Domain", style="blue")
-    table.add_column("Models", style="green")
+    table.add_column("Models", justify="right", style="green")
     table.add_column("Billing", justify="center")
     table.add_column("Bypass", style="yellow")
 
-    for i, r in enumerate(result.results, 1):
-        # Key: show first 10 + last 8 chars
-        key_display = f"{r.key[:10]}...{r.key[-8:]}" if len(r.key) > 20 else r.key
+    for r in result.results:
+        # Key display
+        key_display = f"{r.key[:10]}...{r.key[-6:]}"
 
         # Status
         label, style = STATUS_STYLES.get(r.status, ("?", "dim"))
         status_text = Text(label, style=style)
 
-        # Models count
+        # Models
         models_str = str(len(r.available_models)) if r.available_models else "-"
 
         # Billing
@@ -65,13 +70,12 @@ def render_table(result: ScanResult, config: Config) -> str:
         else:
             billing_str = Text("-", style="dim")
 
-        # Bypass technique
-        bypass_str = r.bypass.technique if r.bypass else "-"
+        # Bypass
+        bypass_str = r.bypass.technique.split(":")[-1] if r.bypass else "-"
 
         table.add_row(
-            str(i),
-            key_display,
             status_text,
+            key_display,
             r.target_domain or "-",
             models_str,
             billing_str,
@@ -79,60 +83,60 @@ def render_table(result: ScanResult, config: Config) -> str:
         )
 
     console.print(table)
+    console.print()
 
-    # Detail panels for valid/bypassed keys
-    for r in result.results:
-        if r.status not in (KeyStatus.VALID, KeyStatus.BYPASSED):
-            continue
-
+    # Detail panels for valid/bypassed keys only
+    working = [r for r in result.results if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED)]
+    for r in working:
         _print_key_detail(r, config)
 
     return ""
 
 
 def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
-    """Print detailed info for a working key."""
+    """Print detailed panel for a working key."""
     lines: list[str] = []
-    lines.append(f"[cyan]Key:[/cyan] {r.key}")
-    lines.append(f"[cyan]Status:[/cyan] {r.status.value}")
-    lines.append(f"[cyan]Domain:[/cyan] {r.target_domain}")
 
-    if r.sources:
-        lines.append(f"[cyan]Sources:[/cyan]")
-        for src in r.sources[:5]:
-            lines.append(f"  - {src}")
-        if len(r.sources) > 5:
-            lines.append(f"  ... and {len(r.sources) - 5} more")
+    lines.append(f"  [bold cyan]Key[/bold cyan]      {r.key}")
+
+    if r.target_domain and r.target_domain != "direct":
+        lines.append(f"  [bold cyan]Domain[/bold cyan]   {r.target_domain}")
+
+    if r.sources and r.sources != ["direct_input"]:
+        lines.append(f"  [bold cyan]Source[/bold cyan]   {r.sources[0]}")
+        for src in r.sources[1:3]:
+            lines.append(f"           {src}")
+        if len(r.sources) > 3:
+            lines.append(f"           [dim]+{len(r.sources) - 3} more[/dim]")
 
     if r.bypass:
-        lines.append(f"[cyan]Bypass:[/cyan] {r.bypass.technique}")
-        if r.bypass.headers:
-            for k, v in r.bypass.headers.items():
-                lines.append(f"  {k}: {v}")
-
-    if r.available_models:
-        lines.append(f"[cyan]Models ({len(r.available_models)}):[/cyan]")
-        for m in r.available_models[:10]:
-            lines.append(f"  - {m}")
-        if len(r.available_models) > 10:
-            lines.append(f"  ... and {len(r.available_models) - 10} more")
+        lines.append(f"  [bold cyan]Bypass[/bold cyan]   {r.bypass.technique}")
+        for k, v in r.bypass.headers.items():
+            lines.append(f"           [dim]{k}: {v}[/dim]")
 
     if r.project_id:
-        lines.append(f"[cyan]Project ID:[/cyan] {r.project_id}")
+        lines.append(f"  [bold cyan]Project[/bold cyan]  {r.project_id}")
 
     if r.billing_enabled is not None:
         billing = "[green]Active[/green]" if r.billing_enabled else "[red]Inactive[/red]"
-        lines.append(f"[cyan]Billing:[/cyan] {billing}")
+        lines.append(f"  [bold cyan]Billing[/bold cyan]  {billing}")
+
+    if r.available_models:
+        lines.append(f"  [bold cyan]Models[/bold cyan]   {len(r.available_models)} available")
+        for m in r.available_models[:5]:
+            lines.append(f"           [dim]{m}[/dim]")
+        if len(r.available_models) > 5:
+            lines.append(f"           [dim]+{len(r.available_models) - 5} more[/dim]")
 
     if r.quota_remaining is not None:
-        lines.append(f"[cyan]Quota:[/cyan] {r.quota_remaining}/{r.quota_limit or '?'}")
+        lines.append(f"  [bold cyan]Quota[/bold cyan]    {r.quota_remaining}/{r.quota_limit or '?'}")
 
     if config.evidence and r.curl_commands:
-        lines.append(f"[cyan]Evidence:[/cyan]")
+        lines.append(f"  [bold cyan]PoC[/bold cyan]")
         for cmd in r.curl_commands:
-            lines.append(f"  $ {cmd}")
+            lines.append(f"    [dim]$ {cmd}[/dim]")
 
     panel_content = "\n".join(lines)
-    key_short = f"...{r.key[-8:]}"
-    style = "green" if r.status == KeyStatus.VALID else "yellow"
-    console.print(Panel(panel_content, title=f"Key {key_short}", border_style=style))
+    border = "green" if r.status == KeyStatus.VALID else "yellow"
+    label = f"[bold {border}]{r.status.value.upper()}[/bold {border}]"
+    console.print(Panel(panel_content, title=label, border_style=border, padding=(1, 1)))

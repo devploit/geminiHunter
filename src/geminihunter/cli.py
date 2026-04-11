@@ -6,7 +6,6 @@ import sys
 
 import click
 from rich.console import Console
-from rich.logging import RichHandler
 
 from geminihunter import __version__
 from geminihunter.config import Config
@@ -14,20 +13,31 @@ from geminihunter.pipeline import Pipeline
 
 console = Console(stderr=True)
 
+BANNER = r"""
+                      _       _ _   _             _
+   __ _  ___ _ __ ___ (_)_ __ (_) | | |_   _ _ __ | |_ ___ _ __
+  / _` |/ _ \ '_ ` _ \| | '_ \| | |_| | | | | '_ \| __/ _ \ '__|
+ | (_| |  __/ | | | | | | | | | |  _  | |_| | | | | ||  __/ |
+  \__, |\___|_| |_| |_|_|_| |_|_|_| |_|\__,_|_| |_|\__\___|_|
+  |___/
+"""
+
 
 def _setup_logging(verbose: bool, quiet: bool) -> None:
-    level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
+    level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.WARNING
     logging.basicConfig(
         level=level,
         format="%(message)s",
-        handlers=[RichHandler(console=console, show_time=False, show_path=False)],
     )
+    # Silence noisy third-party loggers always
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("hpack").setLevel(logging.WARNING)
+    logging.getLogger("h2").setLevel(logging.WARNING)
 
-BANNER = """
-   ╔═╗┌─┐┌┬┐┬┌┐┌┬╦ ╦┬ ┬┌┐┌┌┬┐┌─┐┬─┐
-   ║ ╦├┤ ││││││││╠═╣│ ││││ │ ├┤ ├┬┘
-   ╚═╝└─┘┘└┘┴┘└┘┴╩ ╩└─┘┘└┘ ┴ └─┘┴└─
-"""
+    # Only show geminihunter logs in verbose mode
+    gh_logger = logging.getLogger("geminihunter")
+    gh_logger.setLevel(logging.DEBUG if verbose else logging.WARNING)
 
 
 def _collect_targets(
@@ -52,12 +62,10 @@ def _collect_targets(
     if scan_json:
         with open(scan_json) as f:
             data = json.load(f)
-        # Extract subdomains[].domain
         for sub in data.get("subdomains", []):
             domain = sub.get("domain", "").strip()
             if domain:
                 targets.append(domain)
-        # Also include scan.targets as fallback if no subdomains
         if not data.get("subdomains"):
             for t in data.get("scan", {}).get("targets", []):
                 if t.strip():
@@ -155,7 +163,7 @@ def main(
     _setup_logging(verbose, quiet)
 
     if not quiet and not json_mode:
-        console.print(BANNER, style="bold red")
+        console.print(BANNER, style="bold cyan")
 
     keys = _collect_keys(key_input, key_file)
     all_targets = _collect_targets(targets, target_file, scan_json) if not keys else []
@@ -163,6 +171,15 @@ def main(
     if not keys and not all_targets:
         console.print("[red]No targets or keys provided. Use --help for usage.[/red]")
         raise SystemExit(1)
+
+    if not quiet and not json_mode:
+        if keys:
+            console.print(f"  [dim]Mode:[/dim]    Key check")
+            console.print(f"  [dim]Keys:[/dim]    {len(keys)}")
+        else:
+            console.print(f"  [dim]Mode:[/dim]    Discovery")
+            console.print(f"  [dim]Targets:[/dim] {len(all_targets)}")
+        console.print()
 
     config = Config(
         targets=all_targets,

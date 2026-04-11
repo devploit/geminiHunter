@@ -4,7 +4,6 @@ import logging
 import time
 
 from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from geminihunter.config import Config
 from geminihunter.discovery.crawler import Crawler
@@ -33,6 +32,12 @@ logger = logging.getLogger("geminihunter")
 console = Console(stderr=True)
 
 
+def _status(config: Config, msg: str) -> None:
+    """Print a status line if not quiet/json."""
+    if not config.quiet and not config.json_mode:
+        console.print(msg)
+
+
 class Pipeline:
     def __init__(self, config: Config):
         self.config = config
@@ -49,12 +54,10 @@ class Pipeline:
             extracted = self._extract(sources)
 
         if not extracted:
-            if not self.config.quiet:
-                console.print("[yellow]No API keys found.[/yellow]")
+            _status(self.config, "  [dim]No API keys found.[/dim]")
             return self._build_result([], [], sources_crawled, start)
 
-        if not self.config.quiet:
-            console.print(f"[green]Found {len(extracted)} unique key(s)[/green]")
+        _status(self.config, f"  [green]+[/green] Found [bold]{len(extracted)}[/bold] unique key(s)\n")
 
         validated = await self._validate(extracted)
 
@@ -84,7 +87,6 @@ class Pipeline:
         return result
 
     def _build_keys_from_input(self) -> list[ExtractedKey]:
-        """Build ExtractedKey objects from direct key input (skip discovery)."""
         return [
             ExtractedKey(
                 key=k,
@@ -96,58 +98,56 @@ class Pipeline:
         ]
 
     async def _discover(self) -> tuple[list[DiscoveredSource], int]:
-        """Run all discovery modules."""
         all_sources: list[DiscoveredSource] = []
-
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            TimeElapsedColumn(),
-            console=console,
-            disable=self.config.quiet,
-        )
+        total_targets = len(self.config.targets)
 
         async with self.session.client() as client:
-            with progress:
-                # Stage 1: Crawl targets
-                task_id = progress.add_task("Crawling targets...", total=len(self.config.targets))
-                crawler = Crawler(client, self.config)
+            # Stage 1: Crawl targets
+            _status(self.config, f"  [cyan]>[/cyan] Crawling {total_targets} target(s)...")
+            crawler = Crawler(client, self.config)
+            for i, target in enumerate(self.config.targets, 1):
+                sources = await crawler.crawl(target)
+                all_sources.extend(sources)
+            _status(self.config, f"    [dim]{len(all_sources)} sources found[/dim]")
+
+            # Stage 2: Wayback Machine
+            if self.config.wayback:
+                _status(self.config, f"  [cyan]>[/cyan] Fetching Wayback Machine JS...")
+                before = len(all_sources)
+                wayback = WaybackFetcher(client, self.config)
                 for target in self.config.targets:
-                    sources = await crawler.crawl(target)
+                    sources = await wayback.fetch_historical_js(target)
                     all_sources.extend(sources)
-                    progress.advance(task_id)
+                added = len(all_sources) - before
+                _status(self.config, f"    [dim]{added} historical sources[/dim]")
 
-                # Stage 2: Wayback Machine
-                if self.config.wayback:
-                    task_id = progress.add_task("Fetching Wayback JS...", total=len(self.config.targets))
-                    wayback = WaybackFetcher(client, self.config)
-                    for target in self.config.targets:
-                        sources = await wayback.fetch_historical_js(target)
+            # Stage 3: Source maps
+            if self.config.sourcemaps:
+                js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
+                if js_urls:
+                    _status(self.config, f"  [cyan]>[/cyan] Chasing {len(js_urls)} source map(s)...")
+                    before = len(all_sources)
+                    sm_chaser = SourceMapChaser(client, self.config)
+                    for js_url in js_urls:
+                        sources = await sm_chaser.chase(js_url)
                         all_sources.extend(sources)
-                        progress.advance(task_id)
+                    added = len(all_sources) - before
+                    _status(self.config, f"    [dim]{added} source map files[/dim]")
 
-                # Stage 3: Source maps
-                if self.config.sourcemaps:
-                    js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
-                    if js_urls:
-                        task_id = progress.add_task("Chasing source maps...", total=len(js_urls))
-                        sm_chaser = SourceMapChaser(client, self.config)
-                        for js_url in js_urls:
-                            sources = await sm_chaser.chase(js_url)
-                            all_sources.extend(sources)
-                            progress.advance(task_id)
+            # Stage 4: Webpack chunks
+            before = len(all_sources)
+            webpack = WebpackChunkFinder(client, self.config)
+            chunk_sources = await webpack.find_chunks(all_sources)
+            all_sources.extend(chunk_sources)
+            added = len(all_sources) - before
+            if added:
+                _status(self.config, f"    [dim]{added} webpack chunks[/dim]")
 
-                # Stage 4: Webpack chunks
-                webpack = WebpackChunkFinder(client, self.config)
-                chunk_sources = await webpack.find_chunks(all_sources)
-                all_sources.extend(chunk_sources)
-
+        _status(self.config, f"  [green]+[/green] Total: [bold]{len(all_sources)}[/bold] sources crawled\n")
         return all_sources, len(all_sources)
 
     def _extract(self, sources: list[DiscoveredSource]) -> list[ExtractedKey]:
-        """Extract and deduplicate API keys from discovered sources."""
+        _status(self.config, "  [cyan]>[/cyan] Extracting API keys...")
         deobfuscator = Deobfuscator()
         extractor = KeyExtractor()
 
@@ -158,16 +158,44 @@ class Pipeline:
         return extractor.all_keys
 
     async def _validate(self, keys: list[ExtractedKey]) -> list[ValidatedKey]:
-        """Validate all keys against the Gemini API."""
+        _status(self.config, f"  [cyan]>[/cyan] Validating {len(keys)} key(s)...")
         async with self.session.client() as client:
             validator = KeyValidator(client, self.config)
-            return await validator.validate_all(keys)
+            results = await validator.validate_all(keys)
+
+        # Print inline summary
+        valid = sum(1 for r in results if r.status == KeyStatus.VALID)
+        bypassed = sum(1 for r in results if r.status == KeyStatus.BYPASSED)
+        forbidden = sum(1 for r in results if r.status == KeyStatus.FORBIDDEN)
+        invalid = sum(1 for r in results if r.status == KeyStatus.INVALID)
+
+        parts = []
+        if valid:
+            parts.append(f"[green]{valid} valid[/green]")
+        if bypassed:
+            parts.append(f"[yellow]{bypassed} bypassed[/yellow]")
+        if forbidden:
+            parts.append(f"[red]{forbidden} forbidden[/red]")
+        if invalid:
+            parts.append(f"[dim]{invalid} invalid[/dim]")
+
+        _status(self.config, f"    {' / '.join(parts)}")
+
+        if bypassed and not self.config.quiet and not self.config.json_mode:
+            for r in results:
+                if r.status == KeyStatus.BYPASSED and r.bypass:
+                    console.print(f"    [yellow]^[/yellow] ...{r.key[-8:]} bypassed via [bold]{r.bypass.technique}[/bold]")
+
+        _status(self.config, "")
+        return results
 
     async def _gather_intel(self, keys: list[ValidatedKey]) -> list[KeyIntelligence]:
-        """Gather intelligence on working keys."""
+        _status(self.config, f"  [cyan]>[/cyan] Gathering intelligence on {len(keys)} key(s)...")
         async with self.session.client() as client:
             recon = KeyRecon(client, self.config)
-            return await recon.gather_all(keys)
+            results = await recon.gather_all(keys)
+        _status(self.config, "")
+        return results
 
     def _build_result(
         self,
@@ -189,7 +217,6 @@ class Pipeline:
         )
 
     def _render(self, result: ScanResult) -> None:
-        """Render output to console/file."""
         if self.config.json_mode:
             output = render_json(result)
         else:
@@ -197,10 +224,9 @@ class Pipeline:
 
         if self.config.output_path:
             with open(self.config.output_path, "w") as f:
-                f.write(output)
+                f.write(output if output else render_json(result))
             if not self.config.quiet:
-                console.print(f"[dim]Results written to {self.config.output_path}[/dim]")
+                console.print(f"  [dim]Results written to {self.config.output_path}[/dim]")
         elif self.config.json_mode:
-            # JSON to stdout for piping
             click_echo = __import__("click").echo
             click_echo(output)
