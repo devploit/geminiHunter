@@ -14,7 +14,7 @@ from geminihunter.pipeline import Pipeline
 console = Console(stderr=True)
 
 BANNER = r"""
-                      _       _ _   _             _
+                       _       _ _   _             _
    __ _  ___ _ __ ___ (_)_ __ (_) | | |_   _ _ __ | |_ ___ _ __
   / _` |/ _ \ '_ ` _ \| | '_ \| | |_| | | | | '_ \| __/ _ \ '__|
  | (_| |  __/ | | | | | | | | | |  _  | |_| | | | | ||  __/ |
@@ -59,17 +59,39 @@ def _collect_targets(
             )
 
     # Import from scan JSON (gengar-style format)
+    # Prefer services[] (httpx-probed URLs) over raw subdomains[]
     if scan_json:
         with open(scan_json) as f:
             data = json.load(f)
-        for sub in data.get("subdomains", []):
-            domain = sub.get("domain", "").strip()
-            if domain:
-                targets.append(domain)
-        if not data.get("subdomains"):
-            for t in data.get("scan", {}).get("targets", []):
-                if t.strip():
-                    targets.append(t.strip())
+
+        services = data.get("services", [])
+        if services:
+            # Group URLs by host, prefer HTTPS over HTTP
+            from collections import defaultdict
+
+            by_host: dict[str, str] = {}
+            for svc in services:
+                url = svc.get("url", "").strip()
+                host = svc.get("host", "").strip()
+                if not url or not host:
+                    continue
+                existing = by_host.get(host)
+                if existing is None:
+                    by_host[host] = url
+                elif url.startswith("https://") and existing.startswith("http://"):
+                    # HTTPS wins over HTTP for the same host
+                    by_host[host] = url
+            targets.extend(by_host.values())
+        else:
+            # Fallback: raw subdomains
+            for sub in data.get("subdomains", []):
+                domain = sub.get("domain", "").strip()
+                if domain:
+                    targets.append(domain)
+            if not data.get("subdomains"):
+                for t in data.get("scan", {}).get("targets", []):
+                    if t.strip():
+                        targets.append(t.strip())
 
     if not sys.stdin.isatty() and not any(t == "-" for t in targets):
         targets.extend(
@@ -201,5 +223,9 @@ def main(
         output_path=output_path,
     )
 
-    result = asyncio.run(Pipeline(config).execute())
+    try:
+        result = asyncio.run(Pipeline(config).execute())
+    except KeyboardInterrupt:
+        console.print("\n  [dim]Interrupted.[/dim]")
+        raise SystemExit(130)
     raise SystemExit(0 if result.keys_valid > 0 or result.keys_bypassed > 0 else 1)

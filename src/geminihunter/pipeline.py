@@ -1,6 +1,7 @@
 """Pipeline orchestrator -- wires all stages together."""
 
 import logging
+import sys
 import time
 
 from rich.console import Console
@@ -103,90 +104,152 @@ class Pipeline:
         all_sources: list[DiscoveredSource] = []
         total_targets = len(self.config.targets)
         sem = asyncio.Semaphore(self.config.concurrency)
+        show = not self.config.quiet and not self.config.json_mode
 
+        # Live progress (raw stderr for in-place overwrite)
+        done_count = 0
+        sources_count = 0
+
+        def _progress(msg: str) -> None:
+            if not show:
+                return
+            sys.stderr.write(f"\r  > {msg}" + " " * 20)
+            sys.stderr.flush()
+
+        def _clear_progress() -> None:
+            if not show:
+                return
+            sys.stderr.write("\r" + " " * 100 + "\r")
+            sys.stderr.flush()
+
+        # --- Phase 1: Crawl targets ---
         async with self.session.client() as client:
-            # Stage 1: Crawl all targets concurrently
-            _status(self.config, f"  [cyan]>[/cyan] Crawling {total_targets} target(s)...")
             crawler = Crawler(client, self.config)
 
             async def _crawl_one(target: str) -> list[DiscoveredSource]:
+                nonlocal done_count, sources_count
                 async with sem:
-                    return await crawler.crawl(target)
+                    result = await crawler.crawl(target)
+                    done_count += 1
+                    sources_count += len(result)
+                    _progress(f"Crawling... {done_count}/{total_targets} targets | {sources_count} sources")
+                    return result
 
-            results = await asyncio.gather(
+            _progress(f"Crawling... 0/{total_targets} targets | 0 sources")
+
+            crawl_results = await asyncio.gather(
                 *[_crawl_one(t) for t in self.config.targets],
                 return_exceptions=True,
             )
-            for r in results:
+            for r in crawl_results:
                 if isinstance(r, list):
                     all_sources.extend(r)
-            _status(self.config, f"    [dim]{len(all_sources)} sources found[/dim]")
 
-            # Stage 2: Wayback Machine (all targets concurrently)
-            if self.config.wayback:
-                _status(self.config, f"  [cyan]>[/cyan] Fetching Wayback Machine JS...")
-                before = len(all_sources)
+        _clear_progress()
+        _status(self.config, f"  [cyan]>[/cyan] Crawled [bold]{total_targets}[/bold] targets | [bold]{len(all_sources)}[/bold] sources")
+
+        # --- Phase 2: Wayback Machine (deduped by root domain) ---
+        if self.config.wayback:
+            async with self.session.client() as client:
                 wayback = WaybackFetcher(client, self.config)
 
-                async def _wayback_one(target: str) -> list[DiscoveredSource]:
-                    async with sem:
-                        return await wayback.fetch_historical_js(target)
+                def _wb_progress(done: int, total: int) -> None:
+                    _progress(f"Wayback... {done}/{total} domains")
 
-                results = await asyncio.gather(
-                    *[_wayback_one(t) for t in self.config.targets],
-                    return_exceptions=True,
+                before = len(all_sources)
+                wb_sources = await wayback.fetch_for_targets(
+                    self.config.targets, on_progress=_wb_progress
                 )
-                for r in results:
-                    if isinstance(r, list):
-                        all_sources.extend(r)
-                _status(self.config, f"    [dim]{len(all_sources) - before} historical sources[/dim]")
+                all_sources.extend(wb_sources)
 
-            # Stage 3: Source maps (all JS URLs concurrently)
-            if self.config.sourcemaps:
-                js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
-                if js_urls:
-                    _status(self.config, f"  [cyan]>[/cyan] Chasing {len(js_urls)} source map(s)...")
-                    before = len(all_sources)
-                    sm_chaser = SourceMapChaser(client, self.config)
-
-                    async def _chase_one(js_url: str) -> list[DiscoveredSource]:
-                        async with sem:
-                            return await sm_chaser.chase(js_url)
-
-                    results = await asyncio.gather(
-                        *[_chase_one(u) for u in js_urls],
-                        return_exceptions=True,
-                    )
-                    for r in results:
-                        if isinstance(r, list):
-                            all_sources.extend(r)
-                    _status(self.config, f"    [dim]{len(all_sources) - before} source map files[/dim]")
-
-            # Stage 4: Webpack chunks
-            before = len(all_sources)
-            webpack = WebpackChunkFinder(client, self.config)
-            chunk_sources = await webpack.find_chunks(all_sources)
-            all_sources.extend(chunk_sources)
+            _clear_progress()
             added = len(all_sources) - before
             if added:
-                _status(self.config, f"    [dim]{added} webpack chunks[/dim]")
+                _status(self.config, f"    [dim]+{added} from Wayback[/dim]")
 
-        _status(self.config, f"  [green]+[/green] Total: [bold]{len(all_sources)}[/bold] sources crawled\n")
+        # --- Phase 3: Source maps + Webpack ---
+        async with self.session.client() as client:
+            js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
+            sm_done = 0
+            total_js = len(js_urls)
+            sm_tasks: list = []
+
+            if self.config.sourcemaps and js_urls:
+                sm_chaser = SourceMapChaser(client, self.config)
+
+                async def _chase_one(js_url: str) -> list[DiscoveredSource]:
+                    nonlocal sm_done
+                    async with sem:
+                        result = await sm_chaser.chase(js_url)
+                        sm_done += 1
+                        _progress(f"Sourcemaps... {sm_done}/{total_js}")
+                        return result
+
+                sm_tasks.extend([_chase_one(u) for u in js_urls])
+
+            webpack = WebpackChunkFinder(client, self.config)
+
+            if sm_tasks:
+                _progress(f"Sourcemaps... 0/{total_js}")
+
+                sm_results = await asyncio.gather(*sm_tasks, return_exceptions=True)
+                extra_sm = 0
+                for r in sm_results:
+                    if isinstance(r, list):
+                        all_sources.extend(r)
+                        extra_sm += len(r)
+
+                _clear_progress()
+                if extra_sm:
+                    _status(self.config, f"    [dim]+{extra_sm} from sourcemaps[/dim]")
+
+            _progress("Webpack chunks...")
+            wp_sources = await webpack.find_chunks(all_sources)
+            all_sources.extend(wp_sources)
+            _clear_progress()
+            if wp_sources:
+                _status(self.config, f"    [dim]+{len(wp_sources)} from webpack[/dim]")
+
+        _status(self.config, f"  [green]+[/green] Total: [bold]{len(all_sources)}[/bold] sources\n")
         return all_sources, len(all_sources)
 
     def _extract(self, sources: list[DiscoveredSource]) -> list[ExtractedKey]:
         from concurrent.futures import ThreadPoolExecutor
 
-        _status(self.config, f"  [cyan]>[/cyan] Extracting API keys from {len(sources)} sources...")
+        show = not self.config.quiet and not self.config.json_mode
+        total = len(sources)
         deobfuscator = Deobfuscator()
         extractor = KeyExtractor()
 
-        # Deobfuscate in parallel threads (CPU-bound)
-        with ThreadPoolExecutor() as pool:
-            processed = list(pool.map(deobfuscator.process, [s.content for s in sources]))
+        def _eprogress(msg: str) -> None:
+            if show:
+                sys.stderr.write(f"\r  > {msg}" + " " * 20)
+                sys.stderr.flush()
 
-        for source, content in zip(sources, processed):
+        # Deobfuscate in parallel threads (CPU-bound)
+        done = 0
+
+        def _deobf_one(content: str) -> str:
+            nonlocal done
+            result = deobfuscator.process(content)
+            done += 1
+            if done % max(1, total // 20) == 0:
+                _eprogress(f"Deobfuscating... {done}/{total}")
+            return result
+
+        _eprogress(f"Deobfuscating... 0/{total}")
+        with ThreadPoolExecutor() as pool:
+            processed = list(pool.map(_deobf_one, [s.content for s in sources]))
+
+        # Extract keys with progress
+        for i, (source, content) in enumerate(zip(sources, processed)):
             extractor.extract_from_source(source, content)
+            if (i + 1) % max(1, total // 20) == 0:
+                _eprogress(f"Extracting... {i + 1}/{total} | {extractor.count} keys")
+
+        if show:
+            sys.stderr.write("\r" + " " * 100 + "\r")
+            sys.stderr.flush()
 
         return extractor.all_keys
 

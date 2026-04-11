@@ -344,6 +344,9 @@ class ComboRefererEndpoint(BypassStrategy):
 # --- Bypass engine ---
 
 
+BYPASS_TIMEOUT = 5.0  # Shorter timeout for bypass attempts
+
+
 class BypassEngine:
     """Runs all registered strategies against a 403'd key."""
 
@@ -366,61 +369,63 @@ class BypassEngine:
         key: str,
         target_domain: str,
         client: httpx.AsyncClient,
-        concurrency: int = 5,
+        concurrency: int = 10,
     ) -> BypassDetail | None:
         """
-        Execute all bypass attempts against a key.
-
-        Returns the first successful BypassDetail, or None if all fail.
+        Execute all bypass attempts concurrently.
+        Returns immediately on first success, cancelling remaining tasks.
         """
         attempts = self.generate_all_attempts(key, target_domain)
-        logger.info(
-            f"Running {len(attempts)} bypass attempts for key ...{key[-8:]}"
-        )
-
         sem = asyncio.Semaphore(concurrency)
+        found: asyncio.Event = asyncio.Event()
+        winner: list[BypassAttempt] = []  # mutable container for result
 
-        async def try_attempt(attempt: BypassAttempt) -> BypassAttempt | None:
+        async def try_attempt(attempt: BypassAttempt) -> None:
+            if found.is_set():
+                return
             async with sem:
+                if found.is_set():
+                    return
                 try:
                     url = attempt.to_url(key)
                     kwargs: dict = {"headers": dict(attempt.headers)}
                     if attempt.body:
                         kwargs["content"] = attempt.body
 
-                    resp = await client.request(attempt.method, url, **kwargs)
-
-                    if resp.status_code == 200:
-                        logger.info(
-                            f"Bypass SUCCESS: {attempt.technique_name} for ...{key[-8:]}"
-                        )
-                        return attempt
-
-                    # Some endpoints return different success codes
-                    if resp.status_code in (200, 201) or (
-                        resp.status_code == 400
-                        and "API_KEY_INVALID" not in resp.text
-                        and "PERMISSION_DENIED" not in resp.text
-                    ):
-                        # 400 without API_KEY_INVALID might mean the key works
-                        # but the request format is wrong
-                        return None
-
-                except (httpx.HTTPError, Exception) as e:
-                    logger.debug(
-                        f"Bypass attempt failed ({attempt.technique_name}): {e}"
+                    resp = await client.request(
+                        attempt.method, url, timeout=BYPASS_TIMEOUT, **kwargs
                     )
 
-            return None
+                    if resp.status_code == 200:
+                        winner.append(attempt)
+                        found.set()
 
-        # Run attempts concurrently, return first success
-        tasks = [try_attempt(a) for a in attempts]
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            if result is not None:
-                detail = result.to_bypass_detail()
-                detail.curl_command = result.to_curl(key)
-                return detail
+                except (httpx.HTTPError, Exception):
+                    pass
 
-        logger.info(f"All bypass attempts failed for ...{key[-8:]}")
+        # Fire all attempts, cancel on first hit
+        tasks = [asyncio.create_task(try_attempt(a)) for a in attempts]
+        try:
+            # Wait for all to finish or until we find a winner
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=BYPASS_TIMEOUT + 2,
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            # Check periodically if we got a winner
+            if not found.is_set():
+                await asyncio.wait(tasks, timeout=0.1)
+        finally:
+            # Cancel any still running
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # Suppress cancellation errors
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if winner:
+            detail = winner[0].to_bypass_detail()
+            detail.curl_command = winner[0].to_curl(key)
+            return detail
+
         return None
