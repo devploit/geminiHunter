@@ -1,14 +1,19 @@
 """JS deobfuscation / beautification before key extraction."""
 
 import logging
+import re
 
 import jsbeautifier
 
 logger = logging.getLogger("geminihunter")
 
+# Detect split key fragments: "AIzaSy" as a standalone string (not followed by 33 chars)
+_SPLIT_HINT_RE = re.compile(r"""["']AIzaSy["']""")
+_FULL_KEY_RE = re.compile(r"AIzaSy[a-zA-Z0-9_-]{33}")
+
 
 class Deobfuscator:
-    """Beautifies minified JS to improve regex extraction accuracy."""
+    """Beautifies minified JS only when split/obfuscated keys are suspected."""
 
     def __init__(self):
         self.opts = jsbeautifier.default_options()
@@ -19,23 +24,17 @@ class Deobfuscator:
 
     def process(self, content: str) -> str:
         """
-        Beautify JS content. Returns original content on failure.
-
-        Only processes content that looks like minified JS (heuristic:
-        average line length > 500 chars).
+        Only beautify if the content has split key fragments ("AIzaSy" + ...)
+        but no full keys. Full keys are found by regex on raw content just fine.
         """
         if not content:
             return content
 
-        # Heuristic: only beautify if it looks minified
-        lines = content.split("\n")
-        if lines:
-            avg_line_len = len(content) / len(lines)
-            if avg_line_len < 500:
-                return content  # Probably not minified, skip
+        # If there are split key hints but no full keys, beautify to help extraction
+        if _SPLIT_HINT_RE.search(content) and not _FULL_KEY_RE.search(content):
+            try:
+                return jsbeautifier.beautify(content, self.opts)
+            except Exception as e:
+                logger.debug(f"Beautification failed: {e}")
 
-        try:
-            return jsbeautifier.beautify(content, self.opts)
-        except Exception as e:
-            logger.debug(f"Beautification failed: {e}")
-            return content
+        return content
