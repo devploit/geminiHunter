@@ -1,13 +1,4 @@
-<p align="center">
-  <pre>
-                    _       _ __  __            __
-   ____ ____  ____ (_)___  (_) / / /_  ______  / /____  _____
-  / __ `/ _ \/ __ `__ \/ / __ \/ / /_/ / / / / __ \/ __/ _ \/ ___/
- / /_/ /  __/ / / / / / / / / / / __  / /_/ / / / / /_/  __/ /
- \__, /\___/_/ /_/ /_/_/_/ /_/_/_/ /_/\__,_/_/ /_/\__/\___/_/
-/____/
-  </pre>
-</p>
+<h1 align="center">geminiHunter</h1>
 
 <p align="center">
   <b>Bug bounty tool to discover, validate, and bypass Google Gemini API keys</b>
