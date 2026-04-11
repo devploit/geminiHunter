@@ -2,7 +2,6 @@
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 from geminihunter.config import Config
@@ -46,10 +45,9 @@ def render_table(result: ScanResult, config: Config) -> str:
     )
 
     # Print header
-    console.print(
-        f"  {'Status':<10}  {'Key':<22}  {'Models':>6}  {'Billing':^7}  {'Bypass'}",
-        style="bold",
-    )
+    header = Text()
+    header.append(f"  {'Status':<10}  {'Key':<22}  {'Models':>6}  {'Billing':^7}  Bypass", style="bold")
+    console.print(header)
 
     for r in result.results:
         key_display = f"{r.key[:10]}...{r.key[-6:]}"
@@ -59,22 +57,25 @@ def render_table(result: ScanResult, config: Config) -> str:
         models_str = str(len(r.available_models)) if r.available_models else "-"
 
         if r.billing_enabled is True:
-            billing = "[bold green]YES[/bold green]"
+            billing_text, billing_style = "YES", "bold green"
         elif r.billing_enabled is False:
-            billing = "[red]NO[/red]"
+            billing_text, billing_style = "NO", "red"
         else:
-            billing = "[dim]-[/dim]"
+            billing_text, billing_style = "-", "dim"
 
         if r.bypass:
             code = r.bypass.bypass_status_code
-            code_label, code_style = BYPASS_CODE_LABEL.get(code, (str(code), "yellow"))
-            bypass = f"[{code_style}]{code_label}[/{code_style}]"
+            bp_label, bp_style = BYPASS_CODE_LABEL.get(code, (str(code), "yellow"))
         else:
-            bypass = "[dim]-[/dim]"
+            bp_label, bp_style = "-", "dim"
 
-        console.print(
-            f"  [{style}]{label:<10}[/{style}]  [cyan]{key_display:<22}[/cyan]  [green]{models_str:>6}[/green]  {billing:^7}  {bypass}"
-        )
+        line = Text()
+        line.append(f"  {label:<10}", style=style)
+        line.append(f"  {key_display:<22}", style="cyan")
+        line.append(f"  {models_str:>6}", style="green")
+        line.append(f"  {billing_text:^7}", style=billing_style)
+        line.append(f"  {bp_label}", style=bp_style)
+        console.print(line)
 
         # Source URLs (full, never truncated)
         sources = [s for s in r.sources if s != "direct_input"]
