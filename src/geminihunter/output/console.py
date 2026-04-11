@@ -45,73 +45,48 @@ def render_table(result: ScanResult, config: Config) -> str:
         f"[dim]({timing_str})[/dim]\n"
     )
 
-    # Results table
-    table = Table(
-        show_header=True,
-        header_style="bold",
-        border_style="dim",
-        pad_edge=False,
-        box=None,
-        padding=(0, 2),
+    # Print header
+    console.print(
+        f"  {'Status':<10}  {'Key':<22}  {'Models':>6}  {'Billing':^7}  {'Bypass'}",
+        style="bold",
     )
-    table.add_column("Status", justify="center", width=10)
-    table.add_column("Key", style="cyan", no_wrap=True)
-    table.add_column("Source", style="dim")
-    table.add_column("Models", justify="right", style="green")
-    table.add_column("Billing", justify="center")
-    table.add_column("Bypass", style="yellow")
 
     for r in result.results:
-        # Key display
         key_display = f"{r.key[:10]}...{r.key[-6:]}"
 
-        # Status
         label, style = STATUS_STYLES.get(r.status, ("?", "dim"))
-        status_text = Text(label, style=style)
 
-        # Models
         models_str = str(len(r.available_models)) if r.available_models else "-"
 
-        # Billing
         if r.billing_enabled is True:
-            billing_str = Text("YES", style="bold green")
+            billing = "[bold green]YES[/bold green]"
         elif r.billing_enabled is False:
-            billing_str = Text("NO", style="red")
+            billing = "[red]NO[/red]"
         else:
-            billing_str = Text("-", style="dim")
+            billing = "[dim]-[/dim]"
 
-        # Bypass
         if r.bypass:
             code = r.bypass.bypass_status_code
             code_label, code_style = BYPASS_CODE_LABEL.get(code, (str(code), "yellow"))
-            bypass_str = Text(code_label, style=code_style)
+            bypass = f"[{code_style}]{code_label}[/{code_style}]"
         else:
-            bypass_str = Text("-", style="dim")
+            bypass = "[dim]-[/dim]"
 
-        # Source display: show first source, truncated
-        if r.sources and r.sources[0] != "direct_input":
-            src = r.sources[0]
-            # Show just the filename or last path segment
-            from urllib.parse import urlparse
-
-            path = urlparse(src).path if src.startswith("http") else src
-            source_display = path.split("/")[-1] or r.target_domain or "-"
-            if len(source_display) > 25:
-                source_display = "..." + source_display[-22:]
-        else:
-            source_display = r.target_domain or "direct"
-
-        table.add_row(
-            status_text,
-            key_display,
-            source_display,
-            models_str,
-            billing_str,
-            bypass_str,
+        console.print(
+            f"  [{style}]{label:<10}[/{style}]  [cyan]{key_display:<22}[/cyan]  [green]{models_str:>6}[/green]  {billing:^7}  {bypass}"
         )
 
-    console.print(table)
-    console.print()
+        # Source URLs (full, never truncated)
+        sources = [s for s in r.sources if s != "direct_input"]
+        if sources:
+            console.print(f"  [dim]found in:[/dim] [blue]{sources[0]}[/blue]")
+            for s in sources[1:3]:
+                console.print(f"           [dim]{s}[/dim]")
+            if len(sources) > 3:
+                console.print(f"           [dim]+{len(sources) - 3} more[/dim]")
+
+        console.print()  # Blank line between entries
+
 
     # Detail panels for valid/bypassed keys only
     working = [r for r in result.results if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED)]
