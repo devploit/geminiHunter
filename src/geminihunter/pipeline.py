@@ -98,41 +98,69 @@ class Pipeline:
         ]
 
     async def _discover(self) -> tuple[list[DiscoveredSource], int]:
+        import asyncio
+
         all_sources: list[DiscoveredSource] = []
         total_targets = len(self.config.targets)
+        sem = asyncio.Semaphore(self.config.concurrency)
 
         async with self.session.client() as client:
-            # Stage 1: Crawl targets
+            # Stage 1: Crawl all targets concurrently
             _status(self.config, f"  [cyan]>[/cyan] Crawling {total_targets} target(s)...")
             crawler = Crawler(client, self.config)
-            for i, target in enumerate(self.config.targets, 1):
-                sources = await crawler.crawl(target)
-                all_sources.extend(sources)
+
+            async def _crawl_one(target: str) -> list[DiscoveredSource]:
+                async with sem:
+                    return await crawler.crawl(target)
+
+            results = await asyncio.gather(
+                *[_crawl_one(t) for t in self.config.targets],
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, list):
+                    all_sources.extend(r)
             _status(self.config, f"    [dim]{len(all_sources)} sources found[/dim]")
 
-            # Stage 2: Wayback Machine
+            # Stage 2: Wayback Machine (all targets concurrently)
             if self.config.wayback:
                 _status(self.config, f"  [cyan]>[/cyan] Fetching Wayback Machine JS...")
                 before = len(all_sources)
                 wayback = WaybackFetcher(client, self.config)
-                for target in self.config.targets:
-                    sources = await wayback.fetch_historical_js(target)
-                    all_sources.extend(sources)
-                added = len(all_sources) - before
-                _status(self.config, f"    [dim]{added} historical sources[/dim]")
 
-            # Stage 3: Source maps
+                async def _wayback_one(target: str) -> list[DiscoveredSource]:
+                    async with sem:
+                        return await wayback.fetch_historical_js(target)
+
+                results = await asyncio.gather(
+                    *[_wayback_one(t) for t in self.config.targets],
+                    return_exceptions=True,
+                )
+                for r in results:
+                    if isinstance(r, list):
+                        all_sources.extend(r)
+                _status(self.config, f"    [dim]{len(all_sources) - before} historical sources[/dim]")
+
+            # Stage 3: Source maps (all JS URLs concurrently)
             if self.config.sourcemaps:
                 js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
                 if js_urls:
                     _status(self.config, f"  [cyan]>[/cyan] Chasing {len(js_urls)} source map(s)...")
                     before = len(all_sources)
                     sm_chaser = SourceMapChaser(client, self.config)
-                    for js_url in js_urls:
-                        sources = await sm_chaser.chase(js_url)
-                        all_sources.extend(sources)
-                    added = len(all_sources) - before
-                    _status(self.config, f"    [dim]{added} source map files[/dim]")
+
+                    async def _chase_one(js_url: str) -> list[DiscoveredSource]:
+                        async with sem:
+                            return await sm_chaser.chase(js_url)
+
+                    results = await asyncio.gather(
+                        *[_chase_one(u) for u in js_urls],
+                        return_exceptions=True,
+                    )
+                    for r in results:
+                        if isinstance(r, list):
+                            all_sources.extend(r)
+                    _status(self.config, f"    [dim]{len(all_sources) - before} source map files[/dim]")
 
             # Stage 4: Webpack chunks
             before = len(all_sources)
@@ -147,13 +175,18 @@ class Pipeline:
         return all_sources, len(all_sources)
 
     def _extract(self, sources: list[DiscoveredSource]) -> list[ExtractedKey]:
-        _status(self.config, "  [cyan]>[/cyan] Extracting API keys...")
+        from concurrent.futures import ThreadPoolExecutor
+
+        _status(self.config, f"  [cyan]>[/cyan] Extracting API keys from {len(sources)} sources...")
         deobfuscator = Deobfuscator()
         extractor = KeyExtractor()
 
-        for source in sources:
-            processed_content = deobfuscator.process(source.content)
-            extractor.extract_from_source(source, processed_content)
+        # Deobfuscate in parallel threads (CPU-bound)
+        with ThreadPoolExecutor() as pool:
+            processed = list(pool.map(deobfuscator.process, [s.content for s in sources]))
+
+        for source, content in zip(sources, processed):
+            extractor.extract_from_source(source, content)
 
         return extractor.all_keys
 

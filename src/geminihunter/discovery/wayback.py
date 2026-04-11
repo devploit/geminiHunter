@@ -39,20 +39,27 @@ class WaybackFetcher:
 
         logger.info(f"Wayback: found {len(js_entries)} unique JS snapshots for {domain}")
 
-        sources: list[DiscoveredSource] = []
-        for timestamp, original_url in js_entries:
-            content = await self._fetch_snapshot(timestamp, original_url)
-            if content:
-                sources.append(
-                    DiscoveredSource(
-                        url=f"wayback:{timestamp}/{original_url}",
+        import asyncio
+
+        sem = asyncio.Semaphore(10)  # Limit concurrent Wayback fetches
+
+        async def _fetch_one(ts: str, orig_url: str) -> DiscoveredSource | None:
+            async with sem:
+                content = await self._fetch_snapshot(ts, orig_url)
+                if content:
+                    return DiscoveredSource(
+                        url=f"wayback:{ts}/{orig_url}",
                         source_type=SourceType.WAYBACK_JS,
                         target_domain=domain,
                         content=content,
                     )
-                )
+                return None
 
-        return sources
+        results = await asyncio.gather(
+            *[_fetch_one(ts, url) for ts, url in js_entries],
+            return_exceptions=True,
+        )
+        return [r for r in results if isinstance(r, DiscoveredSource)]
 
     async def _query_cdx(self, domain: str) -> list[tuple[str, str]]:
         """Query the CDX API for unique JS file snapshots."""

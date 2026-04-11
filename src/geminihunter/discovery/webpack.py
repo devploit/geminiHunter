@@ -66,16 +66,20 @@ class WebpackChunkFinder:
 
         logger.info(f"Webpack: found {len(chunk_urls)} chunk URLs to fetch")
 
-        results: list[DiscoveredSource] = []
-        for chunk_url in chunk_urls:
-            source = await self._fetch_chunk(
-                chunk_url,
-                sources[0].target_domain if sources else "",
-            )
-            if source:
-                results.append(source)
+        import asyncio
 
-        return results
+        domain = sources[0].target_domain if sources else ""
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch_one(url: str) -> DiscoveredSource | None:
+            async with sem:
+                return await self._fetch_chunk(url, domain)
+
+        fetched = await asyncio.gather(
+            *[_fetch_one(u) for u in chunk_urls],
+            return_exceptions=True,
+        )
+        return [r for r in fetched if isinstance(r, DiscoveredSource)]
 
     def _extract_chunk_urls(self, content: str, base_url: str) -> list[str]:
         """Extract webpack chunk URLs from JS content."""
