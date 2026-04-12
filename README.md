@@ -231,12 +231,12 @@ Options:
 ```
 Target Input                     Key Input                APK Input
 (domains, files, stdin, json)    (--key, --key-file)      (--apk .apk/.xapk)
-         |                              |                        |
-   +-----v--------+                     |                  +------v------+
+         |                              |                         |
+   +-----v--------+                     |                  +------v-------+
    |  Discovery   |                     |                  |   Decompile  |
    |  - Crawl     |                     |                  |   jadx/ZIP   |
-   |  - Wayback   |                     |                  +------+------+
-   |  - Sourcemaps|                     |                        |
+   |  - Wayback   |                     |                  +------+-------+
+   |  - Sourcemaps|                     |                         |
    |  - Webpack   |                     |                  +------v------+
    |  - Preload   |                     |                  |  Scan files  |
    +-----+--------+                     |                  |  .java .xml  |
