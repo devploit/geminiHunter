@@ -12,6 +12,7 @@ class SourceType(str, Enum):
     JS_MAP = "js_map"
     WAYBACK_JS = "wayback_js"
     WEBPACK_CHUNK = "webpack_chunk"
+    APK_FILE = "apk_file"
     DIRECT_INPUT = "direct_input"
 
 
@@ -58,6 +59,7 @@ class BypassDetail(BaseModel):
     body: str | None = None
     curl_command: str = ""
     bypass_status_code: int = 200
+    key_in_header: bool = False
 
 
 class ValidatedKey(BaseModel):
@@ -83,7 +85,9 @@ class KeyIntelligence(BaseModel):
 
     # Intelligence fields
     available_models: list[str] = Field(default_factory=list)
+    tuned_models: list[str] = Field(default_factory=list)
     project_id: str | None = None
+    project_name: str | None = None
     billing_enabled: bool | None = None
     quota_remaining: int | None = None
     quota_limit: int | None = None

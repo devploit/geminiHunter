@@ -1,12 +1,20 @@
 """API key extraction and deduplication engine."""
 
+import base64
 import logging
+import re
 
 from geminihunter.extraction.patterns import (
+    BASE64_KEY_RE,
+    CONCAT_PART_RE,
+    FALLBACK_KEY_RE,
     GOOGLE_API_KEY_RE,
+    HEX_PREFIX_RE,
+    MULTILINE_CONCAT_RE,
     REVERSE_KEY_RE,
     SPLIT_KEY_ARRAY_JOIN,
     SPLIT_KEY_CONCAT,
+    SPLIT_KEY_TEMPLATE,
 )
 from geminihunter.models import DiscoveredSource, ExtractedKey
 
@@ -38,23 +46,54 @@ class KeyExtractor:
         # Primary: direct regex match
         found_keys.update(GOOGLE_API_KEY_RE.findall(text))
 
-        # Secondary: concatenation patterns
+        # Concatenation: "AIzaSy" + "suffix"
         for match in SPLIT_KEY_CONCAT.finditer(text):
             suffix = match.group(1)
             if len(suffix) == 33:
                 found_keys.add(f"AIzaSy{suffix}")
 
-        # Array join patterns
+        # Array join: ["AIzaSy","rest"].join("")
         for match in SPLIT_KEY_ARRAY_JOIN.finditer(text):
             suffix = match.group(1)
             if len(suffix) == 33:
                 found_keys.add(f"AIzaSy{suffix}")
 
-        # Reversed key patterns
+        # Reversed keys
         for match in REVERSE_KEY_RE.finditer(text):
             reversed_key = match.group(1)[::-1]
             if reversed_key.startswith("AIzaSy"):
                 found_keys.add(reversed_key)
+
+        # Template literal: `AIzaSy${expr}` -- extract only when expr is a literal value
+        for match in SPLIT_KEY_TEMPLATE.finditer(text):
+            inner = match.group(1).strip().strip("\"'")
+            if re.fullmatch(r"[a-zA-Z0-9_-]{33}", inner):
+                found_keys.add(f"AIzaSy{inner}")
+
+        # Multi-part concatenation: "AIzaSy" + "p1" + "p2" + ...
+        for match in MULTILINE_CONCAT_RE.finditer(text):
+            parts = CONCAT_PART_RE.findall(match.group(0))
+            if parts and parts[0] == "AIzaSy":
+                suffix = "".join(parts[1:])
+                if len(suffix) == 33:
+                    found_keys.add(f"AIzaSy{suffix}")
+
+        # Fallback/default values: || "AIzaSy..."
+        found_keys.update(FALLBACK_KEY_RE.findall(text))
+
+        # Hex-encoded prefix: \x41\x49\x7a\x61\x53\x79 + plain suffix
+        for match in HEX_PREFIX_RE.finditer(text):
+            found_keys.add(f"AIzaSy{match.group(1)}")
+
+        # Base64-encoded keys: "QUl6YVN5..." -> decode -> "AIzaSy..."
+        for match in BASE64_KEY_RE.finditer(text):
+            try:
+                b64str = match.group(1).replace("-", "+").replace("_", "/")
+                decoded = base64.b64decode(b64str).decode("ascii")
+                if decoded.startswith("AIzaSy"):
+                    found_keys.add(decoded)
+            except Exception:
+                pass
 
         # Dedup against global state
         new_keys: list[str] = []

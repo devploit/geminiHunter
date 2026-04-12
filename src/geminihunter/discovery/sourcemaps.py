@@ -2,6 +2,8 @@
 
 import json
 import logging
+import re
+from urllib.parse import urljoin
 
 import httpx
 
@@ -9,6 +11,11 @@ from geminihunter.config import Config
 from geminihunter.models import DiscoveredSource, SourceType
 
 logger = logging.getLogger("geminihunter")
+
+# Matches //# sourceMappingURL=<url> or //@ sourceMappingURL=<url>
+SOURCEMAP_COMMENT_RE = re.compile(
+    r"//[#@]\s*sourceMappingURL\s*=\s*(\S+)", re.MULTILINE
+)
 
 
 class SourceMapChaser:
@@ -18,23 +25,45 @@ class SourceMapChaser:
         self.client = client
         self.config = config
 
-    async def chase(self, js_url: str) -> list[DiscoveredSource]:
+    async def chase(
+        self, js_url: str, js_content: str | None = None
+    ) -> list[DiscoveredSource]:
         """
         Try to find and parse the source map for a JS file.
 
         Checks:
-        1. {js_url}.map
-        2. sourceMappingURL comment in the JS file (if accessible)
+        1. sourceMappingURL comment in JS content (exact path)
+        2. {js_url}.map (common convention)
         """
         sources: list[DiscoveredSource] = []
+        tried: set[str] = set()
 
-        # Try the common .map extension
+        # Method 1: Parse sourceMappingURL from JS content
+        if js_content:
+            match = SOURCEMAP_COMMENT_RE.search(js_content)
+            if match:
+                raw_map_url = match.group(1)
+                # Skip inline data URIs
+                if not raw_map_url.startswith("data:"):
+                    map_url = urljoin(js_url, raw_map_url)
+                    tried.add(map_url)
+                    map_content = await self._fetch_map(map_url)
+                    if map_content:
+                        extracted = self._extract_sources_from_map(
+                            map_content, map_url, js_url
+                        )
+                        sources.extend(extracted)
+                        return sources
+
+        # Method 2: Try the common .map extension
         map_url = f"{js_url}.map"
-        map_content = await self._fetch_map(map_url)
-
-        if map_content:
-            extracted = self._extract_sources_from_map(map_content, map_url, js_url)
-            sources.extend(extracted)
+        if map_url not in tried:
+            map_content = await self._fetch_map(map_url)
+            if map_content:
+                extracted = self._extract_sources_from_map(
+                    map_content, map_url, js_url
+                )
+                sources.extend(extracted)
 
         return sources
 
@@ -78,9 +107,9 @@ class SourceMapChaser:
             f"Source map {map_url}: {len(sources_content)} source files"
         )
 
-        from urllib.parse import urlparse
+        from urllib.parse import urlparse as _urlparse
 
-        domain = urlparse(js_url).hostname or ""
+        domain = _urlparse(js_url).hostname or ""
 
         results: list[DiscoveredSource] = []
         for i, content in enumerate(sources_content):

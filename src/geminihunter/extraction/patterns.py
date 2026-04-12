@@ -29,3 +29,31 @@ SPLIT_KEY_ARRAY_JOIN = re.compile(
 REVERSE_KEY_RE = re.compile(
     r"""["']([a-zA-Z0-9_-]{33}ySzIA)["']""",
 )
+
+# --- New patterns ---
+
+# Multi-part concatenation: "AIzaSy" + "part1" + "part2" + ...
+# Matches the whole expression; use CONCAT_PART_RE to extract individual parts
+MULTILINE_CONCAT_RE = re.compile(
+    r"""["']AIzaSy["']\s*(?:\+\s*["'][a-zA-Z0-9_-]+["']\s*){2,}""",
+    re.DOTALL,
+)
+
+# Helper to extract individual string parts from a multiline concat match
+CONCAT_PART_RE = re.compile(r"""["']([a-zA-Z0-9_-]+)["']""")
+
+# Fallback/default value: || "AIzaSy..."
+FALLBACK_KEY_RE = re.compile(
+    r"""\|\|\s*["'](AIzaSy[a-zA-Z0-9_-]{33})["']"""
+)
+
+# Hex-encoded prefix: "\x41\x49\x7a\x61\x53\x79" = "AIzaSy"
+HEX_PREFIX_RE = re.compile(
+    r"""(?:\\x41\\x49\\x7[aA]\\x61\\x53\\x79)([a-zA-Z0-9_-]{33})"""
+)
+
+# Base64-encoded full key: btoa("AIzaSy...") = "QUl6YVN5..."
+# "AIzaSy" base64-encodes to "QUl6YVN5"; full 39-byte key = 52 base64 chars (no padding)
+BASE64_KEY_RE = re.compile(
+    r"""["'](QUl6YVN5[A-Za-z0-9+/\-_]{44}=?=?)["']"""
+)

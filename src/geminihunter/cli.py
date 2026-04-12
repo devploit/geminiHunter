@@ -164,6 +164,7 @@ def _collect_keys(key_input: str | None, key_file: str | None) -> list[str]:
 @click.option("-sj", "--scan-json", type=click.Path(exists=True), help="Scan JSON file (gengar-style: extracts subdomains)")
 @click.option("-k", "--key", "key_input", default=None, help="API key(s) to check directly (comma-separated, or - for stdin)")
 @click.option("--key-file", type=click.Path(exists=True), help="File with API keys (one per line)")
+@click.option("--apk", "apk_files", multiple=True, type=click.Path(exists=True), help="APK/XAPK file(s) to decompile and scan")
 @click.option("--depth", default=2, type=int, show_default=True, help="Crawl depth")
 @click.option("--wayback/--no-wayback", default=True, show_default=True, help="Include Wayback Machine JS")
 @click.option("--sourcemaps/--no-sourcemaps", default=True, show_default=True, help="Chase .js.map files")
@@ -186,6 +187,7 @@ def main(
     scan_json,
     key_input,
     key_file,
+    apk_files,
     depth,
     wayback,
     sourcemaps,
@@ -233,14 +235,25 @@ def main(
         console.print(BANNER, style="bold cyan")
 
     keys = _collect_keys(key_input, key_file)
-    all_targets = _collect_targets(targets, target_file, scan_json) if not keys else []
+    apk_paths = list(apk_files)
+    all_targets = _collect_targets(targets, target_file, scan_json) if not keys or apk_paths else []
 
-    if not keys and not all_targets:
-        console.print("[red]No targets or keys provided. Use --help for usage.[/red]")
+    if not keys and not all_targets and not apk_paths:
+        console.print("[red]No targets, keys, or APK files provided. Use --help for usage.[/red]")
         raise SystemExit(1)
 
     if not quiet and not json_mode:
-        if keys:
+        if apk_paths and all_targets:
+            console.print(f"  [dim]Mode:[/dim]    APK + Discovery")
+            console.print(f"  [dim]APKs:[/dim]    {len(apk_paths)}")
+            console.print(f"  [dim]Targets:[/dim] {len(all_targets)}")
+        elif apk_paths:
+            mode_extra = f" + {len(keys)} key(s)" if keys else ""
+            console.print(f"  [dim]Mode:[/dim]    APK scan{mode_extra}")
+            console.print(f"  [dim]APKs:[/dim]    {len(apk_paths)}")
+            for p in apk_paths:
+                console.print(f"             [dim]{os.path.basename(p)}[/dim]")
+        elif keys:
             console.print(f"  [dim]Mode:[/dim]    Key check")
             console.print(f"  [dim]Keys:[/dim]    {len(keys)}")
         else:
@@ -251,6 +264,7 @@ def main(
     config = Config(
         targets=all_targets,
         keys=keys,
+        apk_paths=apk_paths,
         depth=depth,
         wayback=wayback,
         sourcemaps=sourcemaps,

@@ -48,10 +48,12 @@ class Pipeline:
         start = time.monotonic()
         timings: dict[str, float] = {}
 
-        if self.config.is_key_mode:
+        needs_discovery = bool(self.config.targets or self.config.apk_paths)
+
+        if self.config.is_key_mode and not self.config.apk_paths:
             extracted = self._build_keys_from_input()
             sources_crawled = 0
-        else:
+        elif needs_discovery:
             t0 = time.monotonic()
             sources, sources_crawled = await self._discover()
             timings["discovery"] = round(time.monotonic() - t0, 2)
@@ -59,6 +61,13 @@ class Pipeline:
             t0 = time.monotonic()
             extracted = self._extract(sources)
             timings["extraction"] = round(time.monotonic() - t0, 2)
+
+            # Merge direct keys if provided alongside APK/targets
+            if self.config.keys:
+                extracted.extend(self._build_keys_from_input())
+        else:
+            extracted = self._build_keys_from_input()
+            sources_crawled = 0
 
         if not extracted:
             _status(self.config, "  [dim]No API keys found.[/dim]")
@@ -134,6 +143,30 @@ class Pipeline:
             sys.stderr.write("\r" + " " * 100 + "\r")
             sys.stderr.flush()
 
+        # --- Phase 0: APK discovery (local, synchronous) ---
+        if self.config.apk_paths:
+            import os
+            from geminihunter.discovery.apk import ApkScanner
+
+            scanner = ApkScanner()
+            engine_label = "[dim](jadx)[/dim]" if scanner.has_jadx else "[dim](zip)[/dim]"
+            _status(self.config, f"  [cyan]>[/cyan] Scanning APK file(s) {engine_label}")
+
+            for path in self.config.apk_paths:
+                _progress(f"APK: {os.path.basename(path)}")
+                apk_sources = scanner.scan(path)
+                all_sources.extend(apk_sources)
+
+            _clear_progress()
+            _status(
+                self.config,
+                f"    [green]+[/green] {len(all_sources)} source(s) from APK",
+            )
+
+        if not self.config.targets:
+            # APK-only mode: skip web discovery phases
+            return all_sources, len(all_sources)
+
         # --- Phase 1: Crawl targets ---
         async with self.session.client() as client:
             crawler = Crawler(client, self.config)
@@ -181,23 +214,27 @@ class Pipeline:
 
         # --- Phase 3: Source maps + Webpack ---
         async with self.session.client() as client:
-            js_urls = [s.url for s in all_sources if s.source_type == SourceType.JS_FILE]
+            js_sources = [
+                (s.url, s.content)
+                for s in all_sources
+                if s.source_type == SourceType.JS_FILE
+            ]
             sm_done = 0
-            total_js = len(js_urls)
+            total_js = len(js_sources)
             sm_tasks: list = []
 
-            if self.config.sourcemaps and js_urls:
+            if self.config.sourcemaps and js_sources:
                 sm_chaser = SourceMapChaser(client, self.config)
 
-                async def _chase_one(js_url: str) -> list[DiscoveredSource]:
+                async def _chase_one(js_url: str, js_content: str) -> list[DiscoveredSource]:
                     nonlocal sm_done
                     async with sem:
-                        result = await sm_chaser.chase(js_url)
+                        result = await sm_chaser.chase(js_url, js_content)
                         sm_done += 1
                         _progress(f"Sourcemaps... {sm_done}/{total_js}")
                         return result
 
-                sm_tasks.extend([_chase_one(u) for u in js_urls])
+                sm_tasks.extend([_chase_one(u, c) for u, c in js_sources])
 
             webpack = WebpackChunkFinder(client, self.config)
 
@@ -222,17 +259,15 @@ class Pipeline:
             if wp_sources:
                 _status(self.config, f"    [dim]+{len(wp_sources)} from webpack[/dim]")
 
-        # Deduplicate sources by URL path (same JS served from different subdomains)
+        # Deduplicate sources by content hash (same content served from different URLs)
+        import hashlib
         before_dedup = len(all_sources)
-        seen_paths: set[str] = set()
+        seen_hashes: set[str] = set()
         unique_sources: list[DiscoveredSource] = []
         for s in all_sources:
-            # Normalize: strip scheme+host, keep path
-            from urllib.parse import urlparse
-
-            path = urlparse(s.url).path if s.url.startswith("http") else s.url
-            if path not in seen_paths:
-                seen_paths.add(path)
+            content_hash = hashlib.md5(s.content.encode()).hexdigest()
+            if content_hash not in seen_hashes:
+                seen_hashes.add(content_hash)
                 unique_sources.append(s)
 
         deduped = before_dedup - len(unique_sources)

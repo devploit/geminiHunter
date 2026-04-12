@@ -22,6 +22,13 @@ def _build_curl(
     return " \\\n  ".join(parts)
 
 
+def _key_url(path: str, key: str, key_in_header: bool = False) -> str:
+    """Build a URL with or without ?key= depending on auth method."""
+    if key_in_header:
+        return f"{GEMINI_BASE_URL}/{path}"
+    return f"{GEMINI_BASE_URL}/{path}?key={key}"
+
+
 def generate_curl_commands(result: KeyIntelligence) -> list[str]:
     """Generate curl commands that reproduce the finding."""
     commands: list[str] = []
@@ -35,7 +42,9 @@ def generate_curl_commands(result: KeyIntelligence) -> list[str]:
     # 2. Bypass PoC (exact technique that works, with body)
     if result.bypass:
         bp = result.bypass
-        url = f"{GEMINI_BASE_URL}/{bp.api_version}/{bp.endpoint}?key={key}"
+        url = _key_url(
+            f"{bp.api_version}/{bp.endpoint}", key, bp.key_in_header
+        )
         commands.append(_build_curl(bp.method, url, bp.headers, bp.body))
 
     # 3. Generate content curl (proves the key can do real work)
@@ -43,7 +52,10 @@ def generate_curl_commands(result: KeyIntelligence) -> list[str]:
     if result.status in (KeyStatus.VALID, KeyStatus.BYPASSED):
         skip = result.bypass and "generateContent" in result.bypass.endpoint
         if not skip:
-            gen_url = f"{GEMINI_BASE_URL}/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
+            kh = result.bypass.key_in_header if result.bypass else False
+            gen_url = _key_url(
+                "v1beta/models/gemini-2.0-flash:generateContent", key, kh
+            )
             hdrs = {"Content-Type": "application/json"}
             if result.bypass:
                 hdrs.update(result.bypass.headers)

@@ -11,6 +11,9 @@ class Config:
     # Direct keys (key-check mode)
     keys: list[str] = field(default_factory=list)
 
+    # APK scanning
+    apk_paths: list[str] = field(default_factory=list)
+
     # Discovery options
     depth: int = 2
     wayback: bool = True

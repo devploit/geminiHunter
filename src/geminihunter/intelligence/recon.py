@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 
@@ -31,14 +32,25 @@ class KeyRecon:
         tasks = [recon_with_sem(k) for k in keys]
         return list(await asyncio.gather(*tasks))
 
+    def _build_url(
+        self, path: str, key: str, api_version: str, key_in_header: bool
+    ) -> str:
+        """Build API URL, omitting ?key= when authentication is via header."""
+        url = f"{GEMINI_BASE_URL}/{api_version}/{path}"
+        if not key_in_header:
+            url += f"?key={key}"
+        return url
+
     async def _recon_one(self, key: ValidatedKey) -> KeyIntelligence:
         """Gather intelligence on a single key."""
         # Build headers for bypassed keys
         headers: dict[str, str] = {}
         api_version = "v1beta"
+        key_in_header = False
         if key.bypass:
             headers = dict(key.bypass.headers)
             api_version = key.bypass.api_version
+            key_in_header = key.bypass.key_in_header
 
         intel = KeyIntelligence(
             key=key.key,
@@ -50,26 +62,35 @@ class KeyRecon:
 
         # Run intelligence probes concurrently
         results = await asyncio.gather(
-            self._list_models(key.key, headers, api_version),
-            self._extract_project_id(key.key, headers, api_version),
-            self._check_billing(key.key, headers, api_version),
+            self._list_models(key.key, headers, api_version, key_in_header),
+            self._list_tuned_models(key.key, headers, api_version, key_in_header),
+            self._extract_project_id(key.key, headers, api_version, key_in_header),
+            self._check_billing(key.key, headers, api_version, key_in_header),
             return_exceptions=True,
         )
 
         if isinstance(results[0], list):
             intel.available_models = results[0]
-        if isinstance(results[1], str):
-            intel.project_id = results[1]
+        if isinstance(results[1], list):
+            intel.tuned_models = results[1]
         if isinstance(results[2], tuple):
-            intel.billing_enabled, intel.quota_remaining, intel.quota_limit = results[2]
+            intel.project_id, intel.project_name = results[2]
+        elif isinstance(results[2], str):
+            intel.project_id = results[2]
+        if isinstance(results[3], tuple):
+            intel.billing_enabled, intel.quota_remaining, intel.quota_limit = results[3]
 
         return intel
 
     async def _list_models(
-        self, key: str, headers: dict[str, str], api_version: str
+        self,
+        key: str,
+        headers: dict[str, str],
+        api_version: str,
+        key_in_header: bool,
     ) -> list[str]:
         """List all available models for this key."""
-        url = f"{GEMINI_BASE_URL}/{api_version}/models?key={key}"
+        url = self._build_url("models", key, api_version, key_in_header)
         try:
             resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
             if resp.status_code != 200:
@@ -88,43 +109,95 @@ class KeyRecon:
             logger.debug(f"Failed to list models: {e}")
             return []
 
+    async def _list_tuned_models(
+        self,
+        key: str,
+        headers: dict[str, str],
+        api_version: str,
+        key_in_header: bool,
+    ) -> list[str]:
+        """List tuned (fine-tuned) models -- indicates custom training data."""
+        url = self._build_url("tunedModels", key, api_version, key_in_header)
+        try:
+            resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
+            if resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            tuned = []
+            for model in data.get("tunedModels", []):
+                name = model.get("name", "")
+                display = model.get("displayName", name)
+                tuned.append(display or name)
+            return sorted(tuned)
+
+        except (httpx.HTTPError, ValueError, KeyError) as e:
+            logger.debug(f"Failed to list tuned models: {e}")
+            return []
+
     async def _extract_project_id(
-        self, key: str, headers: dict[str, str], api_version: str
-    ) -> str | None:
+        self,
+        key: str,
+        headers: dict[str, str],
+        api_version: str,
+        key_in_header: bool,
+    ) -> tuple[str | None, str | None]:
         """
-        Try to extract the GCP project ID from API responses.
+        Try to extract the GCP project ID and name from API responses.
 
         Google often includes project info in error messages or response headers.
         """
+        project_id: str | None = None
+        project_name: str | None = None
+
         # Method 1: Try an intentionally bad request that leaks project info
-        url = f"{GEMINI_BASE_URL}/{api_version}/models/nonexistent-model?key={key}"
+        url = self._build_url(
+            "models/nonexistent-model", key, api_version, key_in_header
+        )
         try:
             resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
             text = resp.text
 
             # Look for project number in error response
-            import re
-
             project_match = re.search(r'"project"\s*:\s*"(\d+)"', text)
             if project_match:
-                return project_match.group(1)
+                project_id = project_match.group(1)
 
-            project_match = re.search(r'project[_\s](?:id|number)["\s:]+(\d+)', text, re.IGNORECASE)
-            if project_match:
-                return project_match.group(1)
+            if not project_id:
+                project_match = re.search(
+                    r'project[_\s](?:id|number)["\s:]+(\d+)', text, re.IGNORECASE
+                )
+                if project_match:
+                    project_id = project_match.group(1)
 
             # Check response headers for project info
-            for header_name in ["x-goog-project-id", "x-goog-project-number"]:
+            for header_name in ("x-goog-project-id", "x-goog-project-number"):
                 if header_name in resp.headers:
-                    return resp.headers[header_name]
+                    project_id = project_id or resp.headers[header_name]
+
+            # Try to extract project name from x-goog-api-resource-name header
+            resource_name = resp.headers.get("x-goog-api-resource-name", "")
+            if resource_name:
+                # Format: projects/{project}/...
+                rn_match = re.search(r"projects/([^/]+)", resource_name)
+                if rn_match:
+                    val = rn_match.group(1)
+                    if val.isdigit():
+                        project_id = project_id or val
+                    else:
+                        project_name = val
 
         except (httpx.HTTPError, Exception) as e:
             logger.debug(f"Failed to extract project ID: {e}")
 
-        return None
+        return project_id, project_name
 
     async def _check_billing(
-        self, key: str, headers: dict[str, str], api_version: str
+        self,
+        key: str,
+        headers: dict[str, str],
+        api_version: str,
+        key_in_header: bool,
     ) -> tuple[bool | None, int | None, int | None]:
         """
         Probe billing status by attempting a generation request.
@@ -132,7 +205,12 @@ class KeyRecon:
         If the key can generate content, billing is likely active.
         Also extracts quota info from response headers.
         """
-        url = f"{GEMINI_BASE_URL}/{api_version}/models/gemini-2.0-flash:generateContent?key={key}"
+        url = self._build_url(
+            "models/gemini-2.0-flash:generateContent",
+            key,
+            api_version,
+            key_in_header,
+        )
         body = json.dumps(
             {"contents": [{"parts": [{"text": "Say 'test' and nothing else."}]}]}
         )

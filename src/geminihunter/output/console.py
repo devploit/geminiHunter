@@ -121,8 +121,11 @@ def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
         for k, v in r.bypass.headers.items():
             lines.append(f"           [dim]{k}: {v}[/dim]")
 
-    if r.project_id:
-        lines.append(f"  [bold cyan]Project[/bold cyan]  {r.project_id}")
+    if r.project_id or r.project_name:
+        project_str = r.project_id or ""
+        if r.project_name:
+            project_str = f"{r.project_name} ({r.project_id})" if r.project_id else r.project_name
+        lines.append(f"  [bold cyan]Project[/bold cyan]  {project_str}")
 
     if r.billing_enabled is not None:
         billing = "[green]Active[/green]" if r.billing_enabled else "[red]Inactive[/red]"
@@ -134,6 +137,13 @@ def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
             lines.append(f"           [dim]{m}[/dim]")
         if len(r.available_models) > 5:
             lines.append(f"           [dim]+{len(r.available_models) - 5} more[/dim]")
+
+    if r.tuned_models:
+        lines.append(f"  [bold cyan]Tuned[/bold cyan]    [bold red]{len(r.tuned_models)} fine-tuned model(s)[/bold red]")
+        for m in r.tuned_models[:5]:
+            lines.append(f"           [red]{m}[/red]")
+        if len(r.tuned_models) > 5:
+            lines.append(f"           [dim]+{len(r.tuned_models) - 5} more[/dim]")
 
     if r.quota_remaining is not None:
         lines.append(f"  [bold cyan]Quota[/bold cyan]    {r.quota_remaining}/{r.quota_limit or '?'}")

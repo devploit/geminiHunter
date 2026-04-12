@@ -36,6 +36,34 @@ LINK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# <link rel="preload" href="..." as="script"> and <link rel="modulepreload" href="...">
+PRELOAD_SCRIPT_RE = re.compile(
+    r'<link[^>]+rel\s*=\s*["\'](?:preload|modulepreload)["\'][^>]+href\s*=\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+PRELOAD_SCRIPT_RE2 = re.compile(
+    r'<link[^>]+href\s*=\s*["\']([^"\']+)["\'][^>]+rel\s*=\s*["\'](?:preload|modulepreload)["\']',
+    re.IGNORECASE,
+)
+
+# Next.js data files: /_next/data/{buildId}/{page}.json
+NEXTJS_DATA_RE = re.compile(
+    r"""["'](/_next/(?:data/[^"'/]+/[^"']+\.json|static/[^"']+\.js))["\']""",
+    re.IGNORECASE,
+)
+
+# Nuxt.js chunks: /_nuxt/*.js
+NUXT_CHUNK_RE = re.compile(
+    r"""["'](/_nuxt/[^"']+\.js)["\']""",
+    re.IGNORECASE,
+)
+
+# Firebase hosting config: /__/firebase/init.json
+FIREBASE_INIT_RE = re.compile(
+    r"""["'](/__/firebase/[^"']+\.(?:json|js))["\']""",
+    re.IGNORECASE,
+)
+
 
 def _normalize_url(base: str, href: str) -> str:
     """Resolve a potentially relative URL against a base."""
@@ -144,6 +172,18 @@ class Crawler:
             js_urls.add(_normalize_url(url, match.group(1)))
         for match in JS_URL_RE.finditer(text):
             js_urls.add(_normalize_url(url, match.group(1)))
+
+        # Preload / modulepreload links
+        for regex in (PRELOAD_SCRIPT_RE, PRELOAD_SCRIPT_RE2):
+            for match in regex.finditer(text):
+                href = match.group(1)
+                if href.endswith((".js", ".mjs")):
+                    js_urls.add(_normalize_url(url, href))
+
+        # Framework-specific data/chunk files
+        for regex in (NEXTJS_DATA_RE, NUXT_CHUNK_RE, FIREBASE_INIT_RE):
+            for match in regex.finditer(text):
+                js_urls.add(_normalize_url(url, match.group(1)))
 
         # Fetch all JS files concurrently
         js_tasks = [self._fetch_js(u, domain, add_sources) for u in js_urls]

