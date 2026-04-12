@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="geminiHunter" width="200">
+</p>
+
 <h1 align="center">geminiHunter</h1>
 
 <p align="center">
@@ -25,73 +29,11 @@
 
 geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs **16 bypass strategies** (73 attempts) to find a working combination. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, and GCP project info.
 
-```
-geminihunter -f subdomains.txt --apk app.apk --evidence
-```
-
-```
-                       _       _ _   _             _
-   __ _  ___ _ __ ___ (_)_ __ (_) | | |_   _ _ __ | |_ ___ _ __
-  / _` |/ _ \ '_ ` _ \| | '_ \| | |_| | | | | '_ \| __/ _ \ '__|
- | (_| |  __/ | | | | | | | | | |  _  | |_| | | | | ||  __/ |
-  \__, |\___|_| |_| |_|_|_| |_|_|_| |_|\__,_|_| |_|\__\___|_|
-  |___/
-
-  Mode:    APK + Discovery
-  APKs:    1
-  Targets: 24
-
-  > Scanning APK file(s) (jadx)
-    + 147 source(s) from APK
-  > Crawled 24 targets | 312 sources
-    +18 from Wayback
-    +42 from sourcemaps
-    +8 from webpack
-    -23 duplicate sources removed
-  + Total: 504 unique sources
-
-  + Found 3 unique key(s)
-
-  > Validating 3 key(s)...
-    1 valid / 1 bypassed / 1 forbidden
-    ^ ...k8mR3xYz bypassed via api_key_header:v1beta
-
-  > Gathering intelligence on 2 key(s)...
-
-  Results  1 valid  1 bypassed  1 forbidden  (4.82s total)
-
-  Status      Key                     Models  Billing  Bypass
-  VALID       AIzaSyCx3k...8mJ4Kz        187     YES     -
-  found in: apk:app.apk/sources/com/example/Config.java
-
-  BYPASSED    AIzaSyRt7m...k8mR3x        187     YES     200 OK
-  found in: https://cdn.example.com/static/js/main.a1b2c3.js
-
-  FORBIDDEN   AIzaSyPq2n...Lm9xWz          -       -     -
-  found in: wayback:20240115/https://old.example.com/app.js
-
-  +----- VALID ------+
-  | Key      AIzaSyCx3k...
-  | Domain   apk
-  | Source   apk:app.apk/sources/com/example/Config.java
-  | Project  my-gcp-project (123456789)
-  | Billing  Active
-  | Models   187 available
-  |            gemini-2.0-flash
-  |            gemini-2.5-pro
-  |            +185 more
-  | Tuned    2 fine-tuned model(s)
-  |            customer-support-v3
-  |            internal-classifier
-  +------------------+
-```
-
 ## Quick Start
 
 ```bash
-# Install
-git clone https://github.com/devploit/geminiHunter.git && cd geminiHunter
-python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+# One-liner install (recommended)
+pipx install git+https://github.com/devploit/geminiHunter.git
 
 # Scan a domain
 geminihunter example.com
@@ -105,15 +47,39 @@ geminihunter --apk app.apk
 
 ## Installation
 
+### Option 1: pipx (recommended)
+
+One command, isolated environment, binary on PATH automatically:
+
 ```bash
-git clone https://github.com/devploit/geminiHunter.git
-cd geminiHunter
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+pipx install git+https://github.com/devploit/geminiHunter.git
 ```
 
-**Optional** -- Install [jadx](https://github.com/skylot/jadx) for better APK decompilation (full Java source recovery):
+> Don't have pipx? Install it with `pip install pipx && pipx ensurepath` or `brew install pipx`.
+
+Update to latest version:
+
+```bash
+pipx upgrade geminihunter
+```
+
+### Option 2: pip
+
+```bash
+pip install git+https://github.com/devploit/geminiHunter.git
+```
+
+### Option 3: From source (development)
+
+```bash
+git clone https://github.com/devploit/geminiHunter.git && cd geminiHunter
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Optional: jadx for APK scanning
+
+Install [jadx](https://github.com/skylot/jadx) for full Java source recovery from APKs:
 
 ```bash
 # macOS
