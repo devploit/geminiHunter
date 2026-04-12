@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="assets/logo.png" alt="geminiHunter" width="200"><br>
+  <img src="assets/logo.png" alt="geminiHunter" width="200">
+</p>
+
+<h1 align="center">geminiHunter</h1>
+
+<p align="center">
   <b>Discover, validate, and bypass Google Gemini API keys from web targets and Android apps</b>
 </p>
 
