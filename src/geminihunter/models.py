@@ -74,6 +74,16 @@ class ValidatedKey(BaseModel):
     raw_response: str = Field(default="", exclude=True)
 
 
+class KeyRestrictions(BaseModel):
+    """Detected restrictions on the Gemini API key."""
+
+    unrestricted: bool = False
+    referrer_restricted: bool = False
+    referrer_pattern: str | None = None
+    ip_restricted: bool = False
+    restriction_type: str | None = None  # "none", "http_referrer", "ip_address", "unknown"
+
+
 class KeyIntelligence(BaseModel):
     """Full intelligence gathered on a working key."""
 
@@ -91,6 +101,7 @@ class KeyIntelligence(BaseModel):
     billing_enabled: bool | None = None
     quota_remaining: int | None = None
     quota_limit: int | None = None
+    restrictions: KeyRestrictions | None = None
 
     # Evidence
     curl_commands: list[str] = Field(default_factory=list)

@@ -145,6 +145,19 @@ def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
         if len(r.tuned_models) > 5:
             lines.append(f"           [dim]+{len(r.tuned_models) - 5} more[/dim]")
 
+    if r.restrictions:
+        rx = r.restrictions
+        if rx.unrestricted:
+            lines.append(f"  [bold cyan]Restrict[/bold cyan] [bold red]None (unrestricted key)[/bold red]")
+        elif rx.referrer_restricted:
+            lines.append(f"  [bold cyan]Restrict[/bold cyan] HTTP Referrer")
+            if rx.referrer_pattern:
+                lines.append(f"           [dim]pattern: {rx.referrer_pattern}[/dim]")
+        elif rx.restriction_type == "application":
+            lines.append(f"  [bold cyan]Restrict[/bold cyan] Application (query param blocked, header works)")
+        elif rx.restriction_type:
+            lines.append(f"  [bold cyan]Restrict[/bold cyan] {rx.restriction_type}")
+
     if r.quota_remaining is not None:
         lines.append(f"  [bold cyan]Quota[/bold cyan]    {r.quota_remaining}/{r.quota_limit or '?'}")
 

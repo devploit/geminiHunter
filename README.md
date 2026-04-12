@@ -27,7 +27,7 @@
 
 ## What it does
 
-geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs **16 bypass strategies** (73 attempts) to find a working combination. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, and GCP project info.
+geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs **16 bypass strategies** (73 attempts) to find a working combination. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, GCP project info, and key restriction type.
 
 ## Quick Start
 
@@ -248,7 +248,7 @@ Target Input                     Key Input                APK Input
    |  dedup       |
    +-----+--------+
          |
-         +<-----------------------------+
+         +<--- direct keys (--key) ----+
          |
    +-----v--------+
    |  Validation  |  GET /v1beta/models?key=...
@@ -266,6 +266,7 @@ Target Input                     Key Input                APK Input
    |  - Tuned     |  GET /v1beta/tunedModels
    |  - Billing   |  POST generateContent
    |  - Project   |  Error response + headers
+   |  - Restrict  |  Referrer/app restriction probe
    +-----+--------+
          |
    +-----v--------+
@@ -365,8 +366,11 @@ For every **valid** or **bypassed** key, geminiHunter gathers:
 | **Project name** | `x-goog-api-resource-name` header | Human-readable project name |
 | **Billing status** | `POST generateContent` | Whether billing is active (can make real API calls) |
 | **Quota** | Response headers | Remaining and total quota if available |
+| **Restrictions** | Bypass analysis + probing | Detects if the key has referrer, application, or no restrictions |
 
 Fine-tuned models are highlighted in red in the output -- they indicate the organization has uploaded custom training data, which significantly increases the impact of the finding.
+
+Unrestricted keys are flagged in red -- they have no application restrictions (no referrer, IP, or app binding), making them usable from anywhere.
 
 ## JSON output
 

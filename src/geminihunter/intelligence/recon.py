@@ -8,7 +8,7 @@ import re
 import httpx
 
 from geminihunter.config import Config
-from geminihunter.models import KeyIntelligence, KeyStatus, ValidatedKey
+from geminihunter.models import KeyIntelligence, KeyRestrictions, KeyStatus, ValidatedKey
 from geminihunter.validation.bypass import GEMINI_BASE_URL
 
 logger = logging.getLogger("geminihunter")
@@ -66,6 +66,7 @@ class KeyRecon:
             self._list_tuned_models(key.key, headers, api_version, key_in_header),
             self._extract_project_id(key.key, headers, api_version, key_in_header),
             self._check_billing(key.key, headers, api_version, key_in_header),
+            self._detect_restrictions(key),
             return_exceptions=True,
         )
 
@@ -79,6 +80,8 @@ class KeyRecon:
             intel.project_id = results[2]
         if isinstance(results[3], tuple):
             intel.billing_enabled, intel.quota_remaining, intel.quota_limit = results[3]
+        if isinstance(results[4], KeyRestrictions):
+            intel.restrictions = results[4]
 
         return intel
 
@@ -256,3 +259,82 @@ class KeyRecon:
         except (httpx.HTTPError, Exception) as e:
             logger.debug(f"Failed to check billing: {e}")
             return None, None, None
+
+    async def _detect_restrictions(self, key: ValidatedKey) -> KeyRestrictions:
+        """
+        Detect what restrictions are applied to this Gemini API key.
+
+        For VALID keys: probe with a bogus Referer to confirm no restrictions.
+        For BYPASSED keys: infer restriction type from the bypass technique.
+        """
+        r = KeyRestrictions()
+
+        if key.status == KeyStatus.VALID:
+            # Key works with bare request -- test if a wrong Referer breaks it
+            url = f"{GEMINI_BASE_URL}/v1beta/models?key={key.key}"
+            try:
+                resp = await self.client.get(
+                    url,
+                    headers={"Referer": "https://evil-test-domain.invalid/"},
+                    timeout=self.config.timeout,
+                )
+                if resp.status_code == 200:
+                    # Works with any Referer → no referrer restriction
+                    r.unrestricted = True
+                    r.restriction_type = "none"
+                else:
+                    # Bare request works but wrong Referer fails → odd, but not restricted
+                    r.unrestricted = True
+                    r.restriction_type = "none"
+            except httpx.HTTPError:
+                r.unrestricted = True
+                r.restriction_type = "none"
+
+        elif key.status == KeyStatus.BYPASSED and key.bypass:
+            technique = key.bypass.technique.lower()
+            bypass_headers = key.bypass.headers
+
+            # Check if bypass used Referer/Origin headers → referrer restriction
+            has_referer = any(
+                k.lower() in ("referer", "origin") for k in bypass_headers
+            )
+
+            if has_referer:
+                r.referrer_restricted = True
+                r.restriction_type = "http_referrer"
+                # Extract the working pattern
+                for k, v in bypass_headers.items():
+                    if k.lower() == "referer":
+                        r.referrer_pattern = v
+                        break
+
+                # Confirm: does it fail without the Referer?
+                bare_url = f"{GEMINI_BASE_URL}/{key.bypass.api_version}/{key.bypass.endpoint}"
+                if not key.bypass.key_in_header:
+                    bare_url += f"?key={key.key}"
+                non_referer_headers = {
+                    k: v for k, v in bypass_headers.items()
+                    if k.lower() not in ("referer", "origin")
+                }
+                try:
+                    resp = await self.client.request(
+                        key.bypass.method,
+                        bare_url,
+                        headers=non_referer_headers,
+                        timeout=self.config.timeout,
+                    )
+                    if resp.status_code == 200:
+                        # Works without Referer too → not actually referrer-restricted
+                        r.referrer_restricted = False
+                        r.restriction_type = "unknown"
+                except httpx.HTTPError:
+                    pass
+
+            elif key.bypass.key_in_header and "api_key_header" in technique:
+                # x-goog-api-key header works but ?key= doesn't → application restriction
+                r.restriction_type = "application"
+
+            else:
+                r.restriction_type = "unknown"
+
+        return r
