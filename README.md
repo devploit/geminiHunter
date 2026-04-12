@@ -14,20 +14,24 @@
 
 ## Features
 
-- **Discovery** -- Crawls domains/subdomains extracting API keys from HTML, JS files, source maps (`.js.map`), webpack chunks, and Wayback Machine historical JS
+- **Discovery** -- Crawls domains/subdomains extracting API keys from HTML, JS files, source maps (`.js.map`), webpack chunks, and Wayback Machine historical JS. Detects `<link rel="preload/modulepreload">` scripts, Next.js/Nuxt.js/Firebase data files, and parses `sourceMappingURL` comments
+- **APK Scanning** -- Decompiles Android APK/XAPK files to extract API keys. Uses `jadx` when available for full Java source decompilation, falls back to ZIP extraction with string extraction from `.dex` and `resources.arsc` (no external tools required)
 - **JS Deobfuscation** -- Beautifies minified JS before regex extraction to catch split/concatenated keys
+- **Key Extraction** -- 10 regex patterns covering direct matches, string concatenation, multi-part splits, array joins, template literals, reversed keys, fallback/default values, hex-encoded prefixes, and base64-encoded keys
 - **Validation** -- Tests extracted keys against the Google Gemini API
-- **403 Bypass Engine** -- 9 bypass strategies with auto-registry pattern:
+- **403 Bypass Engine** -- 16 bypass strategies generating 73 attempts per key:
   - Referer rotation (Google, target domain, common values)
   - Origin header manipulation
   - X-Forwarded-For / X-Real-IP spoofing
   - API version bruteforce (v1, v1beta, v1beta2, v1beta3)
-  - Endpoint switching (models, generateContent, embedContent, countTokens)
+  - Endpoint switching (models, generateContent, embedContent, countTokens, streamGenerateContent, tunedModels, cachedContents, files, corpora)
   - HTTP method switching
-  - Combo strategies (Referer + version, Referer + endpoint)
-- **Key Intelligence** -- Enumerates available models, billing status, quota, and GCP project ID
+  - `x-goog-api-key` header authentication (key via header instead of query param)
+  - Google SDK header/User-Agent impersonation
+  - Combo strategies (Referer + version, Referer + endpoint, header + Referer + Origin)
+- **Key Intelligence** -- Enumerates available models, fine-tuned models, billing status, quota, GCP project ID and project name
 - **OPSEC** -- Proxy rotation, rate limiting, User-Agent rotation, configurable delays
-- **Flexible Input** -- Domains, files, stdin pipe, scan JSON (gengar-style), or direct API keys
+- **Flexible Input** -- Domains, files, stdin pipe, scan JSON (gengar-style), direct API keys, or APK/XAPK files
 - **Pipeline-friendly** -- JSON output, exit codes, stdin/stdout compatible with recon tools
 
 ## Installation
@@ -38,6 +42,16 @@ cd geminiHunter
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+```
+
+**Optional**: Install [jadx](https://github.com/skylot/jadx) for better APK decompilation results:
+
+```bash
+# macOS
+brew install jadx
+
+# Linux
+sudo apt install jadx
 ```
 
 ## Usage
@@ -59,6 +73,25 @@ subfinder -d example.com | httpx -silent | geminihunter
 
 # JSON output to file
 geminihunter -f subs.txt --json -o results.json
+```
+
+### APK mode -- scan Android apps
+
+```bash
+# Single APK
+geminihunter --apk app.apk
+
+# XAPK (auto-extracts inner APKs)
+geminihunter --apk app.xapk
+
+# Multiple APKs
+geminihunter --apk base.apk --apk split_config.apk
+
+# APK + web targets
+geminihunter --apk app.apk example.com
+
+# APK + direct key validation
+geminihunter --apk app.apk -k AIzaSyEXTRA_KEY_TO_CHECK
 ```
 
 ### Key-check mode -- validate keys directly
@@ -87,6 +120,7 @@ Options:
   -sj, --scan-json PATH          Scan JSON file (gengar-style: extracts subdomains)
   -k, --key TEXT                  API key(s) to check directly (comma-separated, or - for stdin)
   --key-file PATH                 File with API keys (one per line)
+  --apk PATH                     APK/XAPK file(s) to decompile and scan (repeatable)
   --depth INTEGER                 Crawl depth  [default: 2]
   --wayback / --no-wayback        Include Wayback Machine JS  [default: wayback]
   --sourcemaps / --no-sourcemaps  Chase .js.map files  [default: sourcemaps]
@@ -109,21 +143,23 @@ Options:
 ## Architecture
 
 ```
-Mode 1 (Discovery):                  Mode 2 (Direct -k):
-  Targets (stdin/file/args/json)       Keys (--key / --key-file / stdin)
-      |                                    |
-  Discovery (crawl, wayback,               |
-             sourcemaps, webpack)          |
-      |                                    |
-  Extraction (deobfuscate, regex,          |
-              dedup)                       |
-      \_______________  __________________/
+Mode 1 (Discovery):                  Mode 2 (Direct -k):     Mode 3 (APK):
+  Targets (stdin/file/args/json)       Keys (--key/file/stdin)   APK/XAPK files (--apk)
+      |                                    |                        |
+  Discovery (crawl, wayback,               |                   Decompile (jadx or ZIP)
+             sourcemaps, webpack,          |                   Extract sources
+             preload, frameworks)          |                        |
+      |                                    |                        |
+  Extraction (deobfuscate + 10 regex       |                   Extraction (10 regex
+              patterns, dedup)             |                    patterns, dedup)
+      \_______________  __________________/___________________/
                       \/
                  Validation  -- test against Gemini API
                       |
-                 Bypass Engine  -- 403 bypass strategies
+                 Bypass Engine  -- 16 strategies, 73 attempts
                       |
-                 Intelligence  -- models, billing, quota, project ID
+                 Intelligence  -- models, tuned models, billing,
+                                  quota, project ID/name
                       |
                  Output  -- rich table / JSON + curl evidence
 ```
@@ -141,6 +177,9 @@ geminihunter -f targets.txt --proxy proxies.txt --rate-limit 5
 
 # Quiet mode for scripting
 geminihunter -f subs.txt -q --json | jq -r '.results[].key'
+
+# APK from app store + web targets
+geminihunter --apk com.target.app.apk -f subs.txt --json -o full_scan.json
 ```
 
 **Exit codes**: `0` if valid/bypassed keys found, `1` otherwise.
@@ -149,15 +188,36 @@ geminihunter -f subs.txt -q --json | jq -r '.results[].key'
 
 | # | Technique | Description |
 |---|-----------|-------------|
-| 1 | `referer_google` | Referer: google.com, aistudio, cloud console |
-| 2 | `referer_target` | Referer: target domain variants |
+| 1 | `referer_google` | Referer: google.com, aistudio, cloud console, ai.google.dev |
+| 2 | `referer_target` | Referer: target domain variants (https, http, www) |
 | 3 | `referer_common` | Referer: googleapis.com, localhost, empty |
-| 4 | `origin_header` | Origin header manipulation |
+| 4 | `origin_header` | Origin header manipulation (Google, null, target) |
 | 5 | `xff_bypass` | X-Forwarded-For / X-Real-IP with internal IPs |
 | 6 | `api_version` | API version bruteforce (v1, v1beta, v1beta2, v1beta3) |
 | 7 | `endpoint_switch` | Different endpoints (models, generateContent, embedContent, countTokens) |
 | 8 | `method_switch` | HTTP method switching (POST, OPTIONS, HEAD) |
-| 9 | `combo_*` | Combinations of Referer + version/endpoint |
+| 9 | `combo_referer_version` | Referer + API version combinations |
+| 10 | `combo_referer_endpoint` | Referer + generateContent endpoint |
+| 11 | `api_key_header` | Key via `x-goog-api-key` header instead of `?key=` query param |
+| 12 | `stream_endpoint` | Streaming endpoint (`streamGenerateContent`) |
+| 13 | `alt_endpoint` | Less common endpoints (tunedModels, cachedContents, files, corpora) |
+| 14 | `combo_header_referer` | Triple: `x-goog-api-key` header + Referer + Origin |
+| 15 | `sdk_headers` | `X-Goog-Api-Client` mimicking official Google SDKs |
+| 16 | `sdk_ua` | User-Agent strings from official Google SDK clients |
+
+## Extraction patterns
+
+| Pattern | Example |
+|---------|---------|
+| Direct match | `AIzaSyABC...XYZ` |
+| String concatenation | `"AIzaSy" + "suffix"` |
+| Multi-part split | `"AIzaSy" + "part1" + "part2" + "part3"` |
+| Array join | `["AIzaSy","rest"].join("")` |
+| Template literal | `` `AIzaSy${"suffix"}` `` |
+| Reversed key | `"76543...ySzIA"` |
+| Fallback/default | `getEnv() \|\| "AIzaSy..."` |
+| Hex-encoded prefix | `"\x41\x49\x7a\x61\x53\x79" + suffix` |
+| Base64-encoded | `"QUl6YVN5..."` (decoded to `AIzaSy...`) |
 
 ## Adding custom bypass strategies
 
