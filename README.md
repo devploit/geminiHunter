@@ -232,27 +232,27 @@ Options:
 Target Input                     Key Input                APK Input
 (domains, files, stdin, json)    (--key, --key-file)      (--apk .apk/.xapk)
          |                              |                        |
-   +-----v-------+                     |                  +------v------+
+   +-----v--------+                     |                  +------v------+
    |  Discovery   |                     |                  |   Decompile  |
    |  - Crawl     |                     |                  |   jadx/ZIP   |
    |  - Wayback   |                     |                  +------+------+
    |  - Sourcemaps|                     |                        |
    |  - Webpack   |                     |                  +------v------+
    |  - Preload   |                     |                  |  Scan files  |
-   +-----+-------+                     |                  |  .java .xml  |
+   +-----+--------+                     |                  |  .java .xml  |
          |                              |                  |  .dex .arsc  |
-   +-----v-------+                     |                  +------+------+
-   |  Extraction  |                     |                        |
-   |  10 patterns |<--------------------------------------------+
+   +-----v--------+                     |                  +------+------+
+   |  Extraction  |                     |                         |
+   |  10 patterns |<----------------------------------------------+
    |  deobfuscate |
    |  dedup       |
-   +-----+-------+
+   +-----+--------+
          |
          +<-----------------------------+
          |
-   +-----v-------+
+   +-----v--------+
    |  Validation  |  GET /v1beta/models?key=...
-   +-----+-------+
+   +-----+--------+
          |
     200? +--> VALID
     403? +--> Bypass Engine (16 strategies, 73 attempts)
@@ -260,20 +260,20 @@ Target Input                     Key Input                APK Input
          |      all fail --> FORBIDDEN
     4xx? +--> INVALID
          |
-   +-----v-------+
+   +-----v--------+
    | Intelligence |  (only for VALID / BYPASSED)
    |  - Models    |  GET /v1beta/models
    |  - Tuned     |  GET /v1beta/tunedModels
    |  - Billing   |  POST generateContent
    |  - Project   |  Error response + headers
-   +-----+-------+
+   +-----+--------+
          |
-   +-----v-------+
+   +-----v--------+
    |    Output    |
    |  Rich table  |
    |  JSON        |
    |  Curl PoCs   |
-   +-------------+
+   +--------------+
 ```
 
 ### Discovery sources
