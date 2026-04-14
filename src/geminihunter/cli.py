@@ -175,6 +175,7 @@ def _collect_keys(key_input: str | None, key_file: str | None) -> list[str]:
 @click.option("--timeout", default=15.0, type=float, show_default=True, help="HTTP timeout (seconds)")
 @click.option("--concurrency", default=20, type=int, show_default=True, help="Max concurrent requests")
 @click.option("--user-agent", default="rotate", show_default=True, help='Custom User-Agent or "rotate"')
+@click.option("--insecure", is_flag=True, help="Disable TLS certificate verification")
 @click.option("-o", "--output", "output_path", type=click.Path(), help="Write results to file")
 @click.option("--json", "json_mode", is_flag=True, help="Output as JSON")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
@@ -198,6 +199,7 @@ def main(
     timeout,
     concurrency,
     user_agent,
+    insecure,
     output_path,
     json_mode,
     verbose,
@@ -227,6 +229,7 @@ def main(
     timeout = _cfg("timeout", timeout)
     concurrency = _cfg("concurrency", concurrency)
     user_agent = _cfg("user_agent", user_agent, "user-agent")
+    insecure = _cfg("insecure", insecure)
     evidence = _cfg("evidence", evidence)
 
     _setup_logging(verbose, quiet)
@@ -236,7 +239,7 @@ def main(
 
     keys = _collect_keys(key_input, key_file)
     apk_paths = list(apk_files)
-    all_targets = _collect_targets(targets, target_file, scan_json) if not keys or apk_paths else []
+    all_targets = _collect_targets(targets, target_file, scan_json)
 
     if not keys and not all_targets and not apk_paths:
         console.print("[red]No targets, keys, or APK files provided. Use --help for usage.[/red]")
@@ -275,6 +278,7 @@ def main(
         timeout=timeout,
         concurrency=concurrency,
         user_agent=user_agent,
+        insecure=insecure,
         json_mode=json_mode,
         verbose=verbose,
         quiet=quiet,
@@ -287,4 +291,8 @@ def main(
     except KeyboardInterrupt:
         console.print("\n  [dim]Interrupted.[/dim]")
         raise SystemExit(130)
-    raise SystemExit(0 if result.keys_valid > 0 or result.keys_bypassed > 0 else 1)
+    raise SystemExit(
+        0
+        if result.keys_valid > 0 or result.keys_bypassed > 0 or result.keys_rate_limited > 0
+        else 1
+    )

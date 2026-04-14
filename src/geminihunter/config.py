@@ -29,6 +29,7 @@ class Config:
     timeout: float = 15.0
     concurrency: int = 20
     user_agent: str = "rotate"
+    insecure: bool = False
 
     # Output
     json_mode: bool = False

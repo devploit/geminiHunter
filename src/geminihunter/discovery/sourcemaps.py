@@ -9,6 +9,7 @@ import httpx
 
 from geminihunter.config import Config
 from geminihunter.models import DiscoveredSource, SourceType
+from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
 
@@ -21,9 +22,15 @@ SOURCEMAP_COMMENT_RE = re.compile(
 class SourceMapChaser:
     """Discovers and extracts source content from .js.map files."""
 
-    def __init__(self, client: httpx.AsyncClient, config: Config):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        config: Config,
+        session: SessionManager,
+    ):
         self.client = client
         self.config = config
+        self.session = session
 
     async def chase(
         self, js_url: str, js_content: str | None = None
@@ -70,8 +77,8 @@ class SourceMapChaser:
     async def _fetch_map(self, url: str) -> str | None:
         """Fetch a source map file."""
         try:
-            resp = await self.client.get(url, timeout=self.config.timeout)
-            if resp.status_code == 200:
+            resp = await self.session.fetch(self.client, url)
+            if resp is not None and resp.status_code == 200:
                 ct = resp.headers.get("content-type", "")
                 # Source maps are JSON
                 if "json" in ct or "octet-stream" in ct or resp.text.startswith("{"):

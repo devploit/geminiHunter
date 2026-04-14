@@ -107,12 +107,18 @@ class KeyExtractor:
                     existing.sources.append(source.url)
                 if source.source_type not in existing.source_types:
                     existing.source_types.append(source.source_type)
+                if (
+                    source.target_domain
+                    and source.target_domain not in existing.target_domains
+                ):
+                    existing.target_domains.append(source.target_domain)
             else:
                 self._seen[key] = ExtractedKey(
                     key=key,
                     sources=[source.url],
                     source_types=[source.source_type],
                     target_domain=source.target_domain,
+                    target_domains=[source.target_domain] if source.target_domain else [],
                 )
                 new_keys.append(key)
 

@@ -20,6 +20,7 @@ class KeyStatus(str, Enum):
     VALID = "valid"
     FORBIDDEN = "forbidden"
     BYPASSED = "bypassed"
+    RATE_LIMITED = "rate_limited"
     INVALID = "invalid"
     UNKNOWN = "unknown"
 
@@ -43,6 +44,7 @@ class ExtractedKey(BaseModel):
     sources: list[str] = Field(default_factory=list)
     source_types: list[SourceType] = Field(default_factory=list)
     target_domain: str = ""
+    target_domains: list[str] = Field(default_factory=list)
     first_seen_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -71,6 +73,7 @@ class ValidatedKey(BaseModel):
     target_domain: str = ""
     sources: list[str] = Field(default_factory=list)
     bypass: BypassDetail | None = None
+    detail: str | None = None
     raw_response: str = Field(default="", exclude=True)
 
 
@@ -92,6 +95,7 @@ class KeyIntelligence(BaseModel):
     target_domain: str = ""
     sources: list[str] = Field(default_factory=list)
     bypass: BypassDetail | None = None
+    detail: str | None = None
 
     # Intelligence fields
     available_models: list[str] = Field(default_factory=list)
@@ -115,6 +119,7 @@ class ScanResult(BaseModel):
     keys_found: int = 0
     keys_valid: int = 0
     keys_bypassed: int = 0
+    keys_rate_limited: int = 0
     keys_forbidden: int = 0
     keys_invalid: int = 0
     duration_seconds: float = 0.0

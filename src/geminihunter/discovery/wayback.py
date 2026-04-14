@@ -11,6 +11,7 @@ import httpx
 
 from geminihunter.config import Config
 from geminihunter.models import DiscoveredSource, SourceType
+from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
 
@@ -42,9 +43,15 @@ def _extract_root_domain(target: str) -> str:
 class WaybackFetcher:
     """Fetches historical JS files from the Wayback Machine."""
 
-    def __init__(self, client: httpx.AsyncClient, config: Config):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        config: Config,
+        session: SessionManager,
+    ):
         self.client = client
         self.config = config
+        self.session = session
 
     async def fetch_for_targets(
         self,
@@ -144,9 +151,16 @@ class WaybackFetcher:
         }
 
         try:
-            resp = await self.client.get(CDX_API, params=params, timeout=30.0)
-            if resp.status_code != 200:
-                logger.debug(f"CDX query failed: {resp.status_code}")
+            resp = await self.session.fetch(
+                self.client,
+                CDX_API,
+                params=params,
+                timeout=30.0,
+            )
+            if resp is None or resp.status_code != 200:
+                logger.debug(
+                    f"CDX query failed: {resp.status_code if resp is not None else 'no_response'}"
+                )
                 return []
 
             data = resp.json()
@@ -166,8 +180,12 @@ class WaybackFetcher:
         snapshot_url = WAYBACK_RAW.format(timestamp=timestamp, url=url)
 
         try:
-            resp = await self.client.get(snapshot_url, timeout=10.0)
-            if resp.status_code == 200:
+            resp = await self.session.fetch(
+                self.client,
+                snapshot_url,
+                timeout=10.0,
+            )
+            if resp is not None and resp.status_code == 200:
                 return resp.text
         except (httpx.HTTPError, Exception) as e:
             logger.debug(f"Failed to fetch wayback snapshot: {e}")

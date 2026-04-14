@@ -7,6 +7,7 @@ import httpx
 
 from geminihunter.config import Config
 from geminihunter.models import DiscoveredSource, SourceType
+from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
 
@@ -39,9 +40,15 @@ GENERIC_CHUNK_RE = re.compile(
 class WebpackChunkFinder:
     """Discovers webpack lazy-loaded chunk JS files."""
 
-    def __init__(self, client: httpx.AsyncClient, config: Config):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        config: Config,
+        session: SessionManager,
+    ):
         self.client = client
         self.config = config
+        self.session = session
 
     async def find_chunks(
         self, sources: list[DiscoveredSource]
@@ -106,8 +113,8 @@ class WebpackChunkFinder:
     ) -> DiscoveredSource | None:
         """Fetch a single webpack chunk."""
         try:
-            resp = await self.client.get(url, timeout=self.config.timeout)
-            if resp.status_code == 200:
+            resp = await self.session.fetch(self.client, url)
+            if resp is not None and resp.status_code == 200:
                 return DiscoveredSource(
                     url=url,
                     source_type=SourceType.WEBPACK_CHUNK,

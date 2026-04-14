@@ -50,7 +50,7 @@ class Pipeline:
 
         needs_discovery = bool(self.config.targets or self.config.apk_paths)
 
-        if self.config.is_key_mode and not self.config.apk_paths:
+        if self.config.is_key_mode and not needs_discovery:
             extracted = self._build_keys_from_input()
             sources_crawled = 0
         elif needs_discovery:
@@ -93,6 +93,7 @@ class Pipeline:
                 target_domain=k.target_domain,
                 sources=k.sources,
                 bypass=k.bypass,
+                detail=k.detail,
             )
             for k in validated
             if k.status not in (KeyStatus.VALID, KeyStatus.BYPASSED)
@@ -115,6 +116,7 @@ class Pipeline:
                 sources=["direct_input"],
                 source_types=[SourceType.DIRECT_INPUT],
                 target_domain="direct",
+                target_domains=["direct"],
             )
             for k in self.config.keys
         ]
@@ -169,7 +171,7 @@ class Pipeline:
 
         # --- Phase 1: Crawl targets ---
         async with self.session.client() as client:
-            crawler = Crawler(client, self.config)
+            crawler = Crawler(client, self.config, self.session)
 
             async def _crawl_one(target: str) -> list[DiscoveredSource]:
                 nonlocal done_count, sources_count
@@ -196,7 +198,7 @@ class Pipeline:
         # --- Phase 2: Wayback Machine (deduped by root domain) ---
         if self.config.wayback:
             async with self.session.client() as client:
-                wayback = WaybackFetcher(client, self.config)
+                wayback = WaybackFetcher(client, self.config, self.session)
 
                 def _wb_progress(done: int, total: int) -> None:
                     _progress(f"Wayback... {done}/{total} domains")
@@ -224,7 +226,7 @@ class Pipeline:
             sm_tasks: list = []
 
             if self.config.sourcemaps and js_sources:
-                sm_chaser = SourceMapChaser(client, self.config)
+                sm_chaser = SourceMapChaser(client, self.config, self.session)
 
                 async def _chase_one(js_url: str, js_content: str) -> list[DiscoveredSource]:
                     nonlocal sm_done
@@ -236,7 +238,7 @@ class Pipeline:
 
                 sm_tasks.extend([_chase_one(u, c) for u, c in js_sources])
 
-            webpack = WebpackChunkFinder(client, self.config)
+            webpack = WebpackChunkFinder(client, self.config, self.session)
 
             if sm_tasks:
                 _progress(f"Sourcemaps... 0/{total_js}")
@@ -259,31 +261,27 @@ class Pipeline:
             if wp_sources:
                 _status(self.config, f"    [dim]+{len(wp_sources)} from webpack[/dim]")
 
-        # Deduplicate sources by content hash (same content served from different URLs)
-        import hashlib
-        before_dedup = len(all_sources)
-        seen_hashes: set[str] = set()
-        unique_sources: list[DiscoveredSource] = []
-        for s in all_sources:
-            content_hash = hashlib.md5(s.content.encode()).hexdigest()
-            if content_hash not in seen_hashes:
-                seen_hashes.add(content_hash)
-                unique_sources.append(s)
-
-        deduped = before_dedup - len(unique_sources)
-        if deduped:
-            _status(self.config, f"    [dim]-{deduped} duplicate sources removed[/dim]")
-
-        _status(self.config, f"  [green]+[/green] Total: [bold]{len(unique_sources)}[/bold] unique sources\n")
-        return unique_sources, before_dedup
+        _status(self.config, f"  [green]+[/green] Total: [bold]{len(all_sources)}[/bold] sources\n")
+        return all_sources, len(all_sources)
 
     def _extract(self, sources: list[DiscoveredSource]) -> list[ExtractedKey]:
         from concurrent.futures import ThreadPoolExecutor
 
         show = not self.config.quiet and not self.config.json_mode
+        import hashlib
+
         total = len(sources)
         deobfuscator = Deobfuscator()
         extractor = KeyExtractor()
+        content_hashes = [
+            hashlib.md5(source.content.encode()).hexdigest() for source in sources
+        ]
+        unique_hashes = list(dict.fromkeys(content_hashes))
+        content_by_hash = {
+            content_hash: source.content
+            for content_hash, source in zip(content_hashes, sources)
+        }
+        total_unique = len(unique_hashes)
 
         def _eprogress(msg: str) -> None:
             if show:
@@ -297,17 +295,19 @@ class Pipeline:
             nonlocal done
             result = deobfuscator.process(content)
             done += 1
-            if done % max(1, total // 20) == 0:
-                _eprogress(f"Deobfuscating... {done}/{total}")
+            if done % max(1, total_unique // 20) == 0:
+                _eprogress(f"Deobfuscating... {done}/{total_unique}")
             return result
 
-        _eprogress(f"Deobfuscating... 0/{total}")
+        _eprogress(f"Deobfuscating... 0/{total_unique}")
         with ThreadPoolExecutor() as pool:
-            processed = list(pool.map(_deobf_one, [s.content for s in sources]))
+            processed = list(pool.map(_deobf_one, [content_by_hash[h] for h in unique_hashes]))
+
+        processed_by_hash = dict(zip(unique_hashes, processed))
 
         # Extract keys with progress
-        for i, (source, content) in enumerate(zip(sources, processed)):
-            extractor.extract_from_source(source, content)
+        for i, source in enumerate(sources):
+            extractor.extract_from_source(source, processed_by_hash[content_hashes[i]])
             if (i + 1) % max(1, total // 20) == 0:
                 _eprogress(f"Extracting... {i + 1}/{total} | {extractor.count} keys")
 
@@ -320,12 +320,13 @@ class Pipeline:
     async def _validate(self, keys: list[ExtractedKey]) -> list[ValidatedKey]:
         _status(self.config, f"  [cyan]>[/cyan] Validating {len(keys)} key(s)...")
         async with self.session.client() as client:
-            validator = KeyValidator(client, self.config)
+            validator = KeyValidator(client, self.config, self.session)
             results = await validator.validate_all(keys)
 
         # Print inline summary
         valid = sum(1 for r in results if r.status == KeyStatus.VALID)
         bypassed = sum(1 for r in results if r.status == KeyStatus.BYPASSED)
+        rate_limited = sum(1 for r in results if r.status == KeyStatus.RATE_LIMITED)
         forbidden = sum(1 for r in results if r.status == KeyStatus.FORBIDDEN)
         invalid = sum(1 for r in results if r.status == KeyStatus.INVALID)
 
@@ -334,6 +335,8 @@ class Pipeline:
             parts.append(f"[green]{valid} valid[/green]")
         if bypassed:
             parts.append(f"[yellow]{bypassed} bypassed[/yellow]")
+        if rate_limited:
+            parts.append(f"[yellow]{rate_limited} rate-limited[/yellow]")
         if forbidden:
             parts.append(f"[red]{forbidden} forbidden[/red]")
         if invalid:
@@ -352,7 +355,7 @@ class Pipeline:
     async def _gather_intel(self, keys: list[ValidatedKey]) -> list[KeyIntelligence]:
         _status(self.config, f"  [cyan]>[/cyan] Gathering intelligence on {len(keys)} key(s)...")
         async with self.session.client() as client:
-            recon = KeyRecon(client, self.config)
+            recon = KeyRecon(client, self.config, self.session)
             results = await recon.gather_all(keys)
         _status(self.config, "")
         return results
@@ -371,6 +374,7 @@ class Pipeline:
             keys_found=len(validated),
             keys_valid=sum(1 for r in results if r.status == KeyStatus.VALID),
             keys_bypassed=sum(1 for r in results if r.status == KeyStatus.BYPASSED),
+            keys_rate_limited=sum(1 for r in results if r.status == KeyStatus.RATE_LIMITED),
             keys_forbidden=sum(1 for r in results if r.status == KeyStatus.FORBIDDEN),
             keys_invalid=sum(1 for r in results if r.status == KeyStatus.INVALID),
             duration_seconds=round(time.monotonic() - start, 2),
@@ -386,7 +390,17 @@ class Pipeline:
 
         if self.config.output_path:
             with open(self.config.output_path, "w") as f:
-                f.write(output if output else render_json(result))
+                if self.config.json_mode:
+                    f.write(output)
+                else:
+                    from rich.console import Console as RichConsole
+
+                    file_console = RichConsole(
+                        record=True,
+                        force_terminal=False,
+                        color_system=None,
+                    )
+                    f.write(render_table(result, self.config, file_console))
             if not self.config.quiet:
                 console.print(f"  [dim]Results written to {self.config.output_path}[/dim]")
         elif self.config.json_mode:

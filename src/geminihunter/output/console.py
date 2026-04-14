@@ -12,6 +12,7 @@ console = Console(stderr=True)
 STATUS_STYLES = {
     KeyStatus.VALID: ("VALID", "bold green"),
     KeyStatus.BYPASSED: ("BYPASSED", "bold yellow"),
+    KeyStatus.RATE_LIMITED: ("429", "bold yellow"),
     KeyStatus.FORBIDDEN: ("403", "red"),
     KeyStatus.INVALID: ("INVALID", "dim"),
     KeyStatus.UNKNOWN: ("ERR", "dim red"),
@@ -23,11 +24,16 @@ BYPASS_CODE_LABEL = {
 }
 
 
-def render_table(result: ScanResult, config: Config) -> str:
+def render_table(
+    result: ScanResult,
+    config: Config,
+    out_console: Console | None = None,
+) -> str:
     """Render scan results as a rich table."""
+    target_console = out_console or console
     if not result.results:
-        console.print("  [dim]No results to display.[/dim]")
-        return ""
+        target_console.print("  [dim]No results to display.[/dim]")
+        return target_console.export_text() if getattr(target_console, "record", False) else ""
 
     # Summary line
     timing_parts = [f"{result.duration_seconds}s total"]
@@ -35,10 +41,11 @@ def render_table(result: ScanResult, config: Config) -> str:
         timing_parts.append(f"{phase}: {secs}s")
     timing_str = " | ".join(timing_parts)
 
-    console.print(
+    target_console.print(
         f"  [bold]Results[/bold]  "
         f"[green]{result.keys_valid} valid[/green]  "
         f"[yellow]{result.keys_bypassed} bypassed[/yellow]  "
+        f"[yellow]{result.keys_rate_limited} rate-limited[/yellow]  "
         f"[red]{result.keys_forbidden} forbidden[/red]  "
         f"[dim]{result.keys_invalid} invalid[/dim]  "
         f"[dim]({timing_str})[/dim]\n"
@@ -47,7 +54,7 @@ def render_table(result: ScanResult, config: Config) -> str:
     # Print header
     header = Text()
     header.append(f"  {'Status':<10}  {'Key':<22}  {'Models':>6}  {'Billing':^7}  Bypass", style="bold")
-    console.print(header)
+    target_console.print(header)
 
     for r in result.results:
         key_display = f"{r.key[:10]}...{r.key[-6:]}"
@@ -75,29 +82,33 @@ def render_table(result: ScanResult, config: Config) -> str:
         line.append(f"  {models_str:>6}", style="green")
         line.append(f"  {billing_text:^7}", style=billing_style)
         line.append(f"  {bp_label}", style=bp_style)
-        console.print(line)
+        target_console.print(line)
 
         # Source URLs (full, never truncated)
         sources = [s for s in r.sources if s != "direct_input"]
         if sources:
-            console.print(f"  [dim]found in:[/dim] [blue]{sources[0]}[/blue]")
+            target_console.print(f"  [dim]found in:[/dim] [blue]{sources[0]}[/blue]")
             for s in sources[1:3]:
-                console.print(f"           [dim]{s}[/dim]")
+                target_console.print(f"           [dim]{s}[/dim]")
             if len(sources) > 3:
-                console.print(f"           [dim]+{len(sources) - 3} more[/dim]")
+                target_console.print(f"           [dim]+{len(sources) - 3} more[/dim]")
 
-        console.print()  # Blank line between entries
+        target_console.print()  # Blank line between entries
 
 
     # Detail panels for valid/bypassed keys only
-    working = [r for r in result.results if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED)]
+    working = [r for r in result.results if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED, KeyStatus.RATE_LIMITED)]
     for r in working:
-        _print_key_detail(r, config)
+        _print_key_detail(r, config, target_console)
 
-    return ""
+    return target_console.export_text() if getattr(target_console, "record", False) else ""
 
 
-def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
+def _print_key_detail(
+    r: KeyIntelligence,
+    config: Config,
+    target_console: Console,
+) -> None:
     """Print detailed panel for a working key."""
     lines: list[str] = []
 
@@ -130,6 +141,9 @@ def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
     if r.billing_enabled is not None:
         billing = "[green]Active[/green]" if r.billing_enabled else "[red]Inactive[/red]"
         lines.append(f"  [bold cyan]Billing[/bold cyan]  {billing}")
+
+    if r.detail:
+        lines.append(f"  [bold cyan]Detail[/bold cyan]   {r.detail}")
 
     if r.available_models:
         lines.append(f"  [bold cyan]Models[/bold cyan]   {len(r.available_models)} available")
@@ -164,10 +178,10 @@ def _print_key_detail(r: KeyIntelligence, config: Config) -> None:
     panel_content = "\n".join(lines)
     border = "green" if r.status == KeyStatus.VALID else "yellow"
     label = f"[bold {border}]{r.status.value.upper()}[/bold {border}]"
-    console.print(Panel(panel_content, title=label, border_style=border, padding=(1, 1)))
+    target_console.print(Panel(panel_content, title=label, border_style=border, padding=(1, 1)))
 
     # Print curls OUTSIDE the panel so they're easy to copy
     if config.evidence and r.curl_commands:
-        console.print(f"  [bold cyan]PoC curls:[/bold cyan]")
+        target_console.print(f"  [bold cyan]PoC curls:[/bold cyan]")
         for cmd in r.curl_commands:
-            console.print(f"  [dim]{cmd}[/dim]\n")
+            target_console.print(f"  [dim]{cmd}[/dim]\n")

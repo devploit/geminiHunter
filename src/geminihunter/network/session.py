@@ -6,11 +6,13 @@ import os
 import random
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
 from geminihunter.config import Config
 from geminihunter.network.ratelimit import RateLimiter
+from geminihunter.network.transport import TransportIssue, classify_transport_error
 
 logger = logging.getLogger("geminihunter")
 
@@ -34,6 +36,8 @@ class SessionManager:
         self.rate_limiter = RateLimiter(config.rate_limit)
         self._proxies = self._load_proxies(config.proxy)
         self._proxy_index = 0
+        self._last_issues: dict[str, TransportIssue] = {}
+        self._host_failures: dict[tuple[str, str], TransportIssue] = {}
 
     def _load_proxies(self, proxy_input: str | None) -> list[str]:
         if proxy_input is None:
@@ -68,6 +72,7 @@ class SessionManager:
             follow_redirects=True,
             http2=True,
             proxy=proxy,
+            verify=not self.config.insecure,
             headers={"User-Agent": self._get_user_agent()},
             limits=httpx.Limits(
                 max_connections=self.config.concurrency,
@@ -79,6 +84,20 @@ class SessionManager:
         finally:
             await c.aclose()
 
+    def _remember_issue(self, url: str, issue: TransportIssue) -> None:
+        self._last_issues[url] = issue
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if host and not issue.retryable:
+            self._host_failures[(parsed.scheme, host)] = issue
+
+    def get_last_issue(self, url: str) -> TransportIssue | None:
+        return self._last_issues.get(url)
+
+    def should_try_http_fallback(self, url: str) -> bool:
+        issue = self.get_last_issue(url)
+        return bool(issue and issue.kind == "tls")
+
     async def fetch(
         self,
         client: httpx.AsyncClient,
@@ -86,9 +105,16 @@ class SessionManager:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         data: str | None = None,
+        params: dict[str, str] | None = None,
+        timeout: float | None = None,
         max_retries: int = 3,
+        retry_on_429: bool = True,
     ) -> httpx.Response | None:
         """Fetch a URL with rate limiting, retries, and error handling."""
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if host and (parsed.scheme, host) in self._host_failures:
+            return None
         await self.rate_limiter.acquire()
 
         for attempt in range(max_retries):
@@ -104,28 +130,42 @@ class SessionManager:
                 if self.config.user_agent == "rotate":
                     kwargs["headers"]["User-Agent"] = self._get_user_agent()
 
-                resp = await client.request(method, url, **kwargs)
+                resp = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    timeout=timeout or self.config.timeout,
+                    **kwargs,
+                )
 
                 if resp.status_code == 429:
+                    if not retry_on_429:
+                        return resp
                     wait = int(resp.headers.get("Retry-After", "30"))
-                    logger.warning(f"Rate limited on {url}, waiting {wait}s")
+                    logger.debug(f"Rate limited on {url}, waiting {wait}s")
                     await asyncio.sleep(wait)
                     continue
 
                 if resp.status_code >= 500:
                     wait = 2**attempt + random.random()
-                    logger.warning(
+                    logger.debug(
                         f"Server error {resp.status_code} on {url}, retry in {wait:.1f}s"
                     )
                     await asyncio.sleep(wait)
                     continue
 
+                self._last_issues.pop(url, None)
                 return resp
 
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as e:
+            except httpx.HTTPError as e:
+                issue = classify_transport_error(e)
+                self._remember_issue(url, issue)
+                if not issue.retryable:
+                    logger.debug(f"Non-retryable {issue.kind} error on {url}: {issue.detail}")
+                    return None
                 wait = 2**attempt + random.random()
-                logger.warning(f"Network error on {url}: {e}, retry in {wait:.1f}s")
+                logger.debug(f"Network error on {url}: {e}, retry in {wait:.1f}s")
                 await asyncio.sleep(wait)
 
-        logger.error(f"Failed after {max_retries} retries: {url}")
+        logger.debug(f"Failed after {max_retries} retries: {url}")
         return None
