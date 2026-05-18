@@ -225,7 +225,6 @@ class Crawler:
 
         for url in urls:
             parsed = urlparse(url)
-            host = parsed.hostname or ""
             same_domain = _same_domain(url, domain)
             is_js = parsed.path.endswith((".js", ".mjs"))
             is_json = parsed.path.endswith((".json", ".webmanifest"))

@@ -27,7 +27,7 @@
 
 ## What it does
 
-geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs **16 bypass strategies** (73 attempts) to find a working combination. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, GCP project info, and key restriction type.
+geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs a probe-based bypass engine that tests candidate referrers, origins, host-forwarding headers, alternate auth placement, API versions, endpoints, and SDK-like client headers within a bounded time budget. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, GCP project info, and key restriction type.
 
 ## Quick Start
 
@@ -255,8 +255,9 @@ Target Input                     Key Input                APK Input
    +-----+--------+
          |
     200? +--> VALID
-    403? +--> Bypass Engine (16 strategies, 73 attempts)
+    403? +--> Bypass Engine (probes + dynamic batches)
          |      200/429? --> BYPASSED
+         |      403 reason changed? --> FORBIDDEN + bypass metadata
          |      all fail --> FORBIDDEN
     4xx? +--> INVALID
          |
@@ -309,28 +310,49 @@ Keys with fewer than 5 unique characters in the suffix are automatically filtere
 
 ## Bypass techniques
 
-When a key returns **403 Forbidden**, the bypass engine tests 16 strategies concurrently, exiting on the first success:
+When a key returns **403 Forbidden**, the active bypass engine does not run a fixed
+"16 strategies / 73 attempts" list. It builds candidate domains and browser
+contexts from the target, source URLs, and Google web origins, then runs
+deduplicated probes and batches until the first useful result or until the
+4-second bypass budget is exhausted.
 
-| # | Strategy | Attempts | Technique |
-|---|----------|----------|-----------|
-| 1 | `referer_google` | 7 | Referer from google.com, aistudio, cloud console, ai.google.dev |
-| 2 | `referer_target` | 4 | Referer set to target domain variants (https, http, www) |
-| 3 | `referer_common` | 7 | Referer from googleapis.com, localhost variants, empty |
-| 4 | `origin_header` | 5 | Origin header: Google domains, null, target domain |
-| 5 | `xff_bypass` | 6 | X-Forwarded-For + X-Real-IP with internal IPs (127.0.0.1, 10.x, etc.) |
-| 6 | `api_version` | 4 | API version rotation: v1, v1beta, v1beta2, v1beta3 |
-| 7 | `endpoint_switch` | 4 | Alternate endpoints: generateContent, embedContent, countTokens |
-| 8 | `method_switch` | 3 | HTTP method: POST, OPTIONS, HEAD |
-| 9 | `combo_referer_version` | 8 | Google Referer + API version combinations |
-| 10 | `combo_referer_endpoint` | 3 | Google Referer + generateContent with JSON body |
-| 11 | `api_key_header` | 4 | Key via `x-goog-api-key` header (no `?key=` in URL) |
-| 12 | `stream_endpoint` | 2 | `streamGenerateContent` streaming endpoint |
-| 13 | `alt_endpoint` | 4 | tunedModels, cachedContents, files, corpora |
-| 14 | `combo_header_referer` | 6 | Triple: `x-goog-api-key` + Referer + Origin (with/without body) |
-| 15 | `sdk_headers` | 3 | `X-Goog-Api-Client` mimicking JS/Python/Go SDKs |
-| 16 | `sdk_ua` | 3 | User-Agent from official Google SDK clients |
+The real technique names emitted in JSON are dynamic. They use these prefixes:
 
-Both **200** and **429** (rate-limited) responses are treated as successful bypasses -- 429 confirms the key is accepted, just throttled.
+| Prefix | What it tests |
+|--------|---------------|
+| `probe:browser-ref-models` | Browser-like `Origin` / `Referer` headers against `GET /models` |
+| `probe:header-browser-models` | Same browser-like probe with the key sent through `x-goog-api-key` |
+| `probe:query-generate` | `POST generateContent` with the key in the query string |
+| `probe:query-browser-generate` | Browser-like `POST generateContent` with host-forwarding headers |
+| `common-referer:models:<referer>` | Common hard-coded `Referer` values against `GET /models` |
+| `common-referer:files:<referer>` | Common hard-coded `Referer` values against `GET /files` |
+| `browser:models:<referer>` | Source, target, or Google-derived `Referer` / `Origin` against `GET /models` |
+| `browser:generate:<model>:<referer>` | Browser-like `POST generateContent` for priority Gemini models |
+| `browser:count:<model>:<referer>` | Browser-like `POST countTokens` for priority Gemini models |
+| `origin-only:<domain>` | Target-derived `Origin` and `Referer` only |
+| `host-override:<domain>` | `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Forwarded` override |
+| `host-override-generate:<domain>` | Host override plus `POST generateContent` |
+| `sdk:models:<client>` | SDK-like `X-Goog-Api-Client` or `User-Agent` against `GET /models` |
+| `sdk:generate:<client>` | SDK-like headers plus `POST generateContent` |
+| `endpoint:models:<api_version>` | `GET /models` across supported API versions |
+| `endpoint:generate:<api_version>:<model>` | `POST generateContent` across API versions and priority models |
+| `endpoint:count:<api_version>:<model>` | `POST countTokens` across API versions and priority models |
+| `endpoint:stream:<api_version>` | `POST streamGenerateContent` |
+| `endpoint:embed:<api_version>` | `POST embedContent` |
+
+Candidate contexts include source URL origins, full source URLs as referers,
+target domains, expanded target-domain variants (`app.`, `api.`, `www.`, `m.`),
+and Google web origins such as AI Studio, Cloud Console, `ai.google.dev`,
+MakerSuite, and Google Search. The active engine also tries common standalone
+referers, including raw `127.0.0.1`, `localhost`, localhost URL variants,
+`https://googleapis.com`, and `https://example.com`.
+
+Both **200** and **429** (rate-limited) responses are treated as successful
+bypasses -- 429 confirms the key is accepted, just throttled. A 403 that changes
+from `API_KEY_HTTP_REFERRER_BLOCKED` to another reason such as
+`SERVICE_DISABLED` is recorded as permission progress with
+`bypass_status_code: 403` and `error_reason: "SERVICE_DISABLED"`, but it is not
+counted as a working bypass because the Gemini API call still cannot be used.
 
 ## APK scanning
 
@@ -421,8 +443,8 @@ geminihunter -f subs.txt -q --json | jq -r '.results[] | select(.status == "vali
 # Count models per key
 geminihunter -k KEY --json | jq '.results[] | {key: .key[0:16], models: (.available_models | length), billing: .billing_enabled}'
 
-# Get bypass technique used
-geminihunter -k KEY --json | jq '.results[] | select(.bypass) | {key: .key[0:16], technique: .bypass.technique, status: .bypass.bypass_status_code}'
+# Get bypass or permission-progress technique used
+geminihunter -k KEY --json | jq '.results[] | select(.bypass) | {key: .key[0:16], result: .status, technique: .bypass.technique, code: .bypass.bypass_status_code, reason: .bypass.error_reason}'
 ```
 
 ## Config file
@@ -466,31 +488,24 @@ pbpaste | geminihunter -k - --no-bypass --json
 
 **Exit codes**: `0` if valid/bypassed keys found, `1` otherwise. Use this in CI/CD or shell conditionals.
 
-## Adding custom bypass strategies
+## Adding custom bypass attempts
 
-The bypass engine uses an auto-registry decorator. Add a new strategy in `src/geminihunter/validation/bypass.py`:
+The legacy `@bypass_strategy` registry still exists in
+`src/geminihunter/validation/bypass.py`, but the active `BypassEngine.run()` flow
+uses explicit probe and batch builders. To make a bypass active, add attempts to
+one of these methods:
 
-```python
-@bypass_strategy
-class MyBypass(BypassStrategy):
-    name = "my_bypass"
+| Method | Use it for |
+|--------|------------|
+| `_classification_probes` | Cheap first-pass probes that should run before the full batches |
+| `_common_referrer_attempts` | Hard-coded standalone `Referer` values such as localhost variants |
+| `_contextual_referrer_attempts` | Source, target, and Google-derived `Origin` / `Referer` contexts |
+| `_host_override_attempts` | Host and forwarded-host header combinations |
+| `_sdk_attempts` | SDK-like client headers and user agents |
+| `_endpoint_matrix_attempts` | API version, model, and endpoint combinations |
 
-    def generate_attempts(self, key: str, target_domain: str) -> list[BypassAttempt]:
-        return [
-            BypassAttempt(
-                technique_name="my_bypass:custom",
-                headers={"X-Custom": "value"},
-            ),
-            # Key via header instead of query param:
-            BypassAttempt(
-                technique_name="my_bypass:header",
-                headers={"x-goog-api-key": key, "X-Custom": "value"},
-                key_in_header=True,
-            ),
-        ]
-```
-
-No other file needs modification -- the `@bypass_strategy` decorator auto-registers it.
+Update this README and add a focused unit test whenever a new active bypass
+family is introduced.
 
 ## Project structure
 
@@ -515,7 +530,7 @@ src/geminihunter/
 
   validation/
     validator.py            # Key validation orchestrator
-    bypass.py               # 16 auto-registered bypass strategies + engine
+    bypass.py               # Probe-based bypass engine + legacy strategy registry
 
   intelligence/
     recon.py                # Post-validation intelligence gathering

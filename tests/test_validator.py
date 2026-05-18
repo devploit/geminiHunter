@@ -8,10 +8,16 @@ from geminihunter.validation.validator import KeyValidator
 
 
 class DummyResponse:
-    def __init__(self, status_code, text=""):
+    def __init__(self, status_code, text="", json_data=None):
         self.status_code = status_code
         self.text = text
         self.headers = {}
+        self._json_data = json_data
+
+    def json(self):
+        if self._json_data is None:
+            raise ValueError("no json")
+        return self._json_data
 
 
 @pytest.mark.asyncio
@@ -60,3 +66,58 @@ async def test_validator_revalidates_429_bypass(monkeypatch):
     assert result[0].status == KeyStatus.BYPASSED
     assert result[0].bypass is not None
     assert result[0].bypass.bypass_status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_validator_reports_referrer_progress_when_service_disabled():
+    initial_403 = {
+        "error": {
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_HTTP_REFERRER_BLOCKED",
+                }
+            ]
+        }
+    }
+
+    class FakeSession:
+        async def fetch(self, *args, **kwargs):
+            return DummyResponse(403, "referer blocked", initial_403)
+
+        def get_last_issue(self, url):
+            return None
+
+    validator = KeyValidator(client=object(), config=Config(), session=FakeSession())
+
+    async def fake_run(*args, **kwargs):
+        assert kwargs["initial_reason"] == "API_KEY_HTTP_REFERRER_BLOCKED"
+        return BypassDetail(
+            technique="common-referer:files:127.0.0.1",
+            headers={"Referer": "127.0.0.1"},
+            api_version="v1beta",
+            endpoint="files",
+            method="GET",
+            bypass_status_code=403,
+            key_in_header=False,
+            error_reason="SERVICE_DISABLED",
+        )
+
+    validator.bypass_engine = SimpleNamespace(run=fake_run)
+
+    result = await validator.validate_all(
+        [
+            ExtractedKey(
+                key="AIzaSy123456789012345678901234567890123",
+                sources=["https://example.com/app.js"],
+                source_types=[SourceType.JS_FILE],
+                target_domain="example.com",
+                target_domains=["example.com"],
+            )
+        ]
+    )
+
+    assert result[0].status == KeyStatus.FORBIDDEN
+    assert result[0].bypass is not None
+    assert result[0].bypass.error_reason == "SERVICE_DISABLED"
+    assert result[0].detail == "referrer restriction passed, but Gemini API is disabled"
