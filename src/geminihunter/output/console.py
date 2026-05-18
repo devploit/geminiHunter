@@ -20,6 +20,7 @@ STATUS_STYLES = {
 
 BYPASS_CODE_LABEL = {
     200: ("200 OK", "bold green"),
+    403: ("403 Permission changed", "yellow"),
     429: ("429 Rate-limited", "bold yellow"),
 }
 
@@ -96,8 +97,13 @@ def render_table(
         target_console.print()  # Blank line between entries
 
 
-    # Detail panels for valid/bypassed keys only
-    working = [r for r in result.results if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED, KeyStatus.RATE_LIMITED)]
+    # Detail panels for working keys and permission-progress attempts.
+    working = [
+        r
+        for r in result.results
+        if r.status in (KeyStatus.VALID, KeyStatus.BYPASSED, KeyStatus.RATE_LIMITED)
+        or r.bypass
+    ]
     for r in working:
         _print_key_detail(r, config, target_console)
 
@@ -127,8 +133,12 @@ def _print_key_detail(
     if r.bypass:
         code = r.bypass.bypass_status_code
         code_label, code_style = BYPASS_CODE_LABEL.get(code, (str(code), "yellow"))
+        if code == 403 and r.bypass.error_reason == "SERVICE_DISABLED":
+            code_label, code_style = "403 Service disabled", "yellow"
         lines.append(f"  [bold cyan]Bypass[/bold cyan]   {r.bypass.technique}")
         lines.append(f"  [bold cyan]Status[/bold cyan]   403 → [{code_style}]{code_label}[/{code_style}]")
+        if r.bypass.error_reason:
+            lines.append(f"  [bold cyan]Reason[/bold cyan]   {r.bypass.error_reason}")
         for k, v in r.bypass.headers.items():
             lines.append(f"           [dim]{k}: {v}[/dim]")
 
@@ -162,13 +172,13 @@ def _print_key_detail(
     if r.restrictions:
         rx = r.restrictions
         if rx.unrestricted:
-            lines.append(f"  [bold cyan]Restrict[/bold cyan] [bold red]None (unrestricted key)[/bold red]")
+            lines.append("  [bold cyan]Restrict[/bold cyan] [bold red]None (unrestricted key)[/bold red]")
         elif rx.referrer_restricted:
-            lines.append(f"  [bold cyan]Restrict[/bold cyan] HTTP Referrer")
+            lines.append("  [bold cyan]Restrict[/bold cyan] HTTP Referrer")
             if rx.referrer_pattern:
                 lines.append(f"           [dim]pattern: {rx.referrer_pattern}[/dim]")
         elif rx.restriction_type == "application":
-            lines.append(f"  [bold cyan]Restrict[/bold cyan] Application (query param blocked, header works)")
+            lines.append("  [bold cyan]Restrict[/bold cyan] Application (query param blocked, header works)")
         elif rx.restriction_type:
             lines.append(f"  [bold cyan]Restrict[/bold cyan] {rx.restriction_type}")
 
@@ -176,12 +186,18 @@ def _print_key_detail(
         lines.append(f"  [bold cyan]Quota[/bold cyan]    {r.quota_remaining}/{r.quota_limit or '?'}")
 
     panel_content = "\n".join(lines)
-    border = "green" if r.status == KeyStatus.VALID else "yellow"
+    border = (
+        "green"
+        if r.status == KeyStatus.VALID
+        else "red"
+        if r.status == KeyStatus.FORBIDDEN
+        else "yellow"
+    )
     label = f"[bold {border}]{r.status.value.upper()}[/bold {border}]"
     target_console.print(Panel(panel_content, title=label, border_style=border, padding=(1, 1)))
 
     # Print curls OUTSIDE the panel so they're easy to copy
     if config.evidence and r.curl_commands:
-        target_console.print(f"  [bold cyan]PoC curls:[/bold cyan]")
+        target_console.print("  [bold cyan]PoC curls:[/bold cyan]")
         for cmd in r.curl_commands:
             target_console.print(f"  [dim]{cmd}[/dim]\n")

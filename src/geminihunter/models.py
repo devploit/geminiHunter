@@ -51,7 +51,7 @@ class ExtractedKey(BaseModel):
 
 
 class BypassDetail(BaseModel):
-    """Details of a successful bypass attempt."""
+    """Details of a bypass or permission-progress attempt."""
 
     technique: str
     headers: dict[str, str] = Field(default_factory=dict)
@@ -62,6 +62,7 @@ class BypassDetail(BaseModel):
     curl_command: str = ""
     bypass_status_code: int = 200
     key_in_header: bool = False
+    error_reason: str | None = None
 
 
 class ValidatedKey(BaseModel):

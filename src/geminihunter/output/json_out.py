@@ -1,6 +1,5 @@
 """JSON output formatter."""
 
-import json
 
 from geminihunter.models import ScanResult
 

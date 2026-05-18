@@ -8,7 +8,11 @@ import httpx
 from geminihunter.config import Config
 from geminihunter.models import ExtractedKey, KeyStatus, ValidatedKey
 from geminihunter.network.session import SessionManager
-from geminihunter.validation.bypass import GEMINI_BASE_URL, BypassEngine
+from geminihunter.validation.bypass import (
+    GEMINI_BASE_URL,
+    BypassEngine,
+    google_error_reason,
+)
 
 logger = logging.getLogger("geminihunter")
 
@@ -59,8 +63,13 @@ class KeyValidator:
 
     @staticmethod
     def _detail_from_response(resp: httpx.Response) -> str | None:
+        reason = google_error_reason(resp)
         text = resp.text.lower()
         if resp.status_code == 403:
+            if reason == "SERVICE_DISABLED":
+                return "403 service disabled"
+            if reason == "API_KEY_HTTP_REFERRER_BLOCKED":
+                return "403 referrer restriction"
             if "billing" in text:
                 return "403 billing disabled"
             if "quota" in text:
@@ -128,6 +137,7 @@ class KeyValidator:
                 )
 
             if status_code == 403 and self.config.bypass:
+                initial_reason = google_error_reason(resp)
                 candidate_domains = key.target_domains or [key.target_domain]
                 seen_domains: set[str] = set()
                 for candidate_domain in candidate_domains:
@@ -142,8 +152,24 @@ class KeyValidator:
                         source_urls=key.sources,
                         target_domains=key.target_domains,
                         concurrency=10,
+                        initial_reason=initial_reason,
                     )
                     if bypass_result:
+                        if bypass_result.bypass_status_code == 403:
+                            detail = (
+                                "referrer restriction passed, but Gemini API is disabled"
+                                if bypass_result.error_reason == "SERVICE_DISABLED"
+                                else "permission changed after bypass attempt"
+                            )
+                            return ValidatedKey(
+                                key=key.key,
+                                status=KeyStatus.FORBIDDEN,
+                                initial_status_code=status_code,
+                                target_domain=candidate_domain,
+                                sources=key.sources,
+                                bypass=bypass_result,
+                                detail=detail,
+                            )
                         bypass_status = KeyStatus.BYPASSED
                         detail = None
                         if bypass_result.bypass_status_code == 429:
