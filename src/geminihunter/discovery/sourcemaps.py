@@ -13,6 +13,9 @@ from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
 
+SOURCEMAP_MAX_RETRIES = 1
+SOURCEMAP_TIMEOUT_CAP = 6.0
+
 # Matches //# sourceMappingURL=<url> or //@ sourceMappingURL=<url>
 SOURCEMAP_COMMENT_RE = re.compile(
     r"//[#@]\s*sourceMappingURL\s*=\s*(\S+)", re.MULTILINE
@@ -77,7 +80,12 @@ class SourceMapChaser:
     async def _fetch_map(self, url: str) -> str | None:
         """Fetch a source map file."""
         try:
-            resp = await self.session.fetch(self.client, url)
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                timeout=min(self.config.timeout, SOURCEMAP_TIMEOUT_CAP),
+                max_retries=SOURCEMAP_MAX_RETRIES,
+            )
             if resp is not None and resp.status_code == 200:
                 ct = resp.headers.get("content-type", "")
                 # Source maps are JSON

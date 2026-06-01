@@ -20,12 +20,26 @@ from geminihunter.models import DiscoveredSource, ExtractedKey
 
 logger = logging.getLogger("geminihunter")
 
+KEY_MATERIAL_MARKERS = (
+    "AIzaSy",
+    "QUl6YVN5",
+    r"\x41\x49\x7a\x61\x53\x79",
+    r"\x41\x49\x7A\x61\x53\x79",
+    "ySzIA",
+    "ySazIA",
+)
+
 
 class KeyExtractor:
     """Extracts and deduplicates Google API keys from sources."""
 
     def __init__(self):
         self._seen: dict[str, ExtractedKey] = {}
+
+    @staticmethod
+    def may_contain_key_material(text: str) -> bool:
+        """Cheap prefilter before running the full extraction regex set."""
+        return any(marker in text for marker in KEY_MATERIAL_MARKERS)
 
     def extract_from_source(
         self, source: DiscoveredSource, content: str | None = None

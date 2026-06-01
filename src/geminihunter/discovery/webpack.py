@@ -2,6 +2,7 @@
 
 import logging
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -10,6 +11,10 @@ from geminihunter.models import DiscoveredSource, SourceType
 from geminihunter.network.session import SessionManager
 
 logger = logging.getLogger("geminihunter")
+
+MAX_WEBPACK_CHUNKS = 64
+WEBPACK_MAX_RETRIES = 1
+WEBPACK_TIMEOUT_CAP = 8.0
 
 # Patterns to find webpack chunk URLs in JS bundles
 # Pattern 1: webpackJsonp or __webpack_require__ with chunk filenames
@@ -57,26 +62,29 @@ class WebpackChunkFinder:
         Scan already-discovered JS sources for webpack chunk references,
         then fetch those chunks.
         """
-        chunk_urls: set[str] = set()
-        fetched_urls = {s.url for s in sources}
+        chunk_urls: list[str] = []
+        seen_urls = {s.url for s in sources}
 
         for source in sources:
             if source.source_type != SourceType.JS_FILE:
                 continue
             discovered = self._extract_chunk_urls(source.content, source.url)
             for url in discovered:
-                if url not in fetched_urls:
-                    chunk_urls.add(url)
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    chunk_urls.append(url)
 
         if not chunk_urls:
             return []
+
+        chunk_urls = self._prioritize_chunks(chunk_urls, sources)
 
         logger.info(f"Webpack: found {len(chunk_urls)} chunk URLs to fetch")
 
         import asyncio
 
         domain = sources[0].target_domain if sources else ""
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(max(1, min(self.config.concurrency, MAX_WEBPACK_CHUNKS)))
 
         async def _fetch_one(url: str) -> DiscoveredSource | None:
             async with sem:
@@ -87,6 +95,26 @@ class WebpackChunkFinder:
             return_exceptions=True,
         )
         return [r for r in fetched if isinstance(r, DiscoveredSource)]
+
+    def _prioritize_chunks(
+        self,
+        urls: list[str],
+        sources: list[DiscoveredSource],
+    ) -> list[str]:
+        source_hosts = {
+            parsed.hostname
+            for source in sources
+            if source.source_type == SourceType.JS_FILE
+            for parsed in [urlparse(source.url)]
+            if parsed.hostname
+        }
+
+        def score(url: str) -> tuple[int, int]:
+            parsed = urlparse(url)
+            same_host = parsed.hostname in source_hosts
+            return (0 if same_host else 1, len(parsed.path))
+
+        return sorted(urls, key=score)[:MAX_WEBPACK_CHUNKS]
 
     def _extract_chunk_urls(self, content: str, base_url: str) -> list[str]:
         """Extract webpack chunk URLs from JS content."""
@@ -113,7 +141,12 @@ class WebpackChunkFinder:
     ) -> DiscoveredSource | None:
         """Fetch a single webpack chunk."""
         try:
-            resp = await self.session.fetch(self.client, url)
+            resp = await self.session.fetch(
+                self.client,
+                url,
+                timeout=min(self.config.timeout, WEBPACK_TIMEOUT_CAP),
+                max_retries=WEBPACK_MAX_RETRIES,
+            )
             if resp is not None and resp.status_code == 200:
                 return DiscoveredSource(
                     url=url,

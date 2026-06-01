@@ -35,10 +35,12 @@ async def test_crawler_falls_back_to_http_after_tls_failure():
     class FakeSession:
         def __init__(self):
             self.calls = []
+            self.options = []
             self.issue = TransportIssue("tls", "hostname mismatch", False)
 
-        async def fetch(self, client, url, headers=None):
+        async def fetch(self, client, url, headers=None, **kwargs):
             self.calls.append(url)
+            self.options.append(kwargs)
             if url.startswith("https://"):
                 return None
             return FakeResponse('<script src="/app.js"></script>')
@@ -51,3 +53,5 @@ async def test_crawler_falls_back_to_http_after_tls_failure():
 
     assert any(url.startswith("http://example.com") for url in crawler.session.calls)
     assert sources
+    assert all(options["max_retries"] == 1 for options in crawler.session.options)
+    assert all(options["timeout"] <= 8.0 for options in crawler.session.options)

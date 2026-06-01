@@ -138,57 +138,56 @@ class KeyValidator:
 
             if status_code == 403 and self.config.bypass:
                 initial_reason = google_error_reason(resp)
-                candidate_domains = key.target_domains or [key.target_domain]
-                seen_domains: set[str] = set()
-                for candidate_domain in candidate_domains:
-                    if candidate_domain in seen_domains:
-                        continue
-                    seen_domains.add(candidate_domain)
-                    bypass_result = await self.bypass_engine.run(
-                        key.key,
-                        candidate_domain,
-                        self.client,
-                        self.session,
-                        source_urls=key.sources,
-                        target_domains=key.target_domains,
-                        concurrency=10,
-                        initial_reason=initial_reason,
-                    )
-                    if bypass_result:
-                        if bypass_result.bypass_status_code == 403:
-                            detail = (
-                                "referrer restriction passed, but Gemini API is disabled"
-                                if bypass_result.error_reason == "SERVICE_DISABLED"
-                                else "permission changed after bypass attempt"
-                            )
-                            return ValidatedKey(
-                                key=key.key,
-                                status=KeyStatus.FORBIDDEN,
-                                initial_status_code=status_code,
-                                target_domain=candidate_domain,
-                                sources=key.sources,
-                                bypass=bypass_result,
-                                detail=detail,
-                            )
-                        bypass_status = KeyStatus.BYPASSED
-                        detail = None
-                        if bypass_result.bypass_status_code == 429:
-                            confirmed = await self._confirm_rate_limited_bypass(
-                                key.key,
-                                bypass_result,
-                            )
-                            if not confirmed:
-                                bypass_status = KeyStatus.RATE_LIMITED
-                                detail = "accepted but rate-limited"
+                candidate_domains = list(dict.fromkeys(
+                    [*(key.target_domains or []), key.target_domain]
+                ))
+                candidate_domains = [d for d in candidate_domains if d]
+                primary_domain = candidate_domains[0] if candidate_domains else key.target_domain
+                bypass_result = await self.bypass_engine.run(
+                    key.key,
+                    primary_domain,
+                    self.client,
+                    self.session,
+                    source_urls=key.sources,
+                    target_domains=candidate_domains,
+                    concurrency=max(1, min(self.config.concurrency, 10)),
+                    initial_reason=initial_reason,
+                )
+                if bypass_result:
+                    if bypass_result.bypass_status_code == 403:
+                        detail = (
+                            "referrer restriction passed, but Gemini API is disabled"
+                            if bypass_result.error_reason == "SERVICE_DISABLED"
+                            else "permission changed after bypass attempt"
+                        )
                         return ValidatedKey(
                             key=key.key,
-                            status=bypass_status,
+                            status=KeyStatus.FORBIDDEN,
                             initial_status_code=status_code,
-                            target_domain=candidate_domain,
+                            target_domain=primary_domain,
                             sources=key.sources,
                             bypass=bypass_result,
                             detail=detail,
                         )
+                    bypass_status = KeyStatus.BYPASSED
+                    detail = None
+                    if bypass_result.bypass_status_code == 429:
+                        confirmed = await self._confirm_rate_limited_bypass(
+                            key.key,
+                            bypass_result,
+                        )
+                        if not confirmed:
+                            bypass_status = KeyStatus.RATE_LIMITED
+                            detail = "accepted but rate-limited"
+                    return ValidatedKey(
+                        key=key.key,
+                        status=bypass_status,
+                        initial_status_code=status_code,
+                        target_domain=primary_domain,
+                        sources=key.sources,
+                        bypass=bypass_result,
+                        detail=detail,
+                    )
                 return ValidatedKey(
                     key=key.key,
                     status=KeyStatus.FORBIDDEN,

@@ -17,6 +17,12 @@ logger = logging.getLogger("geminihunter")
 
 CDX_API = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_RAW = "https://web.archive.org/web/{timestamp}id_/{url}"
+WAYBACK_CDX_LIMIT = 25
+WAYBACK_DOMAIN_CONCURRENCY = 8
+WAYBACK_SNAPSHOT_CONCURRENCY = 16
+WAYBACK_MAX_RETRIES = 1
+WAYBACK_CDX_TIMEOUT = 15.0
+WAYBACK_SNAPSHOT_TIMEOUT_CAP = 8.0
 
 
 def _extract_root_domain(target: str) -> str:
@@ -80,7 +86,9 @@ class WaybackFetcher:
         if on_progress:
             on_progress(0, total)
 
-        sem = asyncio.Semaphore(5)  # Wayback CDX is slow, don't hammer it
+        sem = asyncio.Semaphore(
+            max(1, min(self.config.concurrency, WAYBACK_DOMAIN_CONCURRENCY))
+        )
 
         async def _query_one(domain: str) -> list[DiscoveredSource]:
             nonlocal done
@@ -119,7 +127,9 @@ class WaybackFetcher:
             f"Wayback: found {len(js_entries)} unique JS snapshots for {domain}"
         )
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(
+            max(1, min(self.config.concurrency, WAYBACK_SNAPSHOT_CONCURRENCY))
+        )
 
         async def _fetch_one(ts: str, orig_url: str) -> DiscoveredSource | None:
             async with sem:
@@ -147,7 +157,7 @@ class WaybackFetcher:
             "fl": "timestamp,original,digest",
             "collapse": "digest",  # Dedup by content hash
             "filter": "statuscode:200",
-            "limit": "50",  # Keep small — we only need a sample, not the full history
+            "limit": str(WAYBACK_CDX_LIMIT),
         }
 
         try:
@@ -155,7 +165,8 @@ class WaybackFetcher:
                 self.client,
                 CDX_API,
                 params=params,
-                timeout=30.0,
+                timeout=min(self.config.timeout, WAYBACK_CDX_TIMEOUT),
+                max_retries=WAYBACK_MAX_RETRIES,
             )
             if resp is None or resp.status_code != 200:
                 logger.debug(
@@ -183,7 +194,8 @@ class WaybackFetcher:
             resp = await self.session.fetch(
                 self.client,
                 snapshot_url,
-                timeout=10.0,
+                timeout=min(self.config.timeout, WAYBACK_SNAPSHOT_TIMEOUT_CAP),
+                max_retries=WAYBACK_MAX_RETRIES,
             )
             if resp is not None and resp.status_code == 200:
                 return resp.text

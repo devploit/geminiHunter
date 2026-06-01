@@ -121,3 +121,43 @@ async def test_validator_reports_referrer_progress_when_service_disabled():
     assert result[0].bypass is not None
     assert result[0].bypass.error_reason == "SERVICE_DISABLED"
     assert result[0].detail == "referrer restriction passed, but Gemini API is disabled"
+
+
+@pytest.mark.asyncio
+async def test_validator_runs_bypass_once_with_all_candidate_domains():
+    class FakeSession:
+        async def fetch(self, *args, **kwargs):
+            return DummyResponse(403, "forbidden")
+
+        def get_last_issue(self, url):
+            return None
+
+    validator = KeyValidator(client=object(), config=Config(), session=FakeSession())
+    calls = []
+
+    async def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return None
+
+    validator.bypass_engine = SimpleNamespace(run=fake_run)
+
+    result = await validator.validate_all(
+        [
+            ExtractedKey(
+                key="AIzaSy123456789012345678901234567890123",
+                sources=["https://a.example.com/app.js"],
+                source_types=[SourceType.JS_FILE],
+                target_domain="example.com",
+                target_domains=["a.example.com", "b.example.com", "example.com"],
+            )
+        ]
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "a.example.com"
+    assert calls[0][1]["target_domains"] == [
+        "a.example.com",
+        "b.example.com",
+        "example.com",
+    ]
+    assert result[0].status == KeyStatus.FORBIDDEN

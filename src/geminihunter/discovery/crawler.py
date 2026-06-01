@@ -23,6 +23,8 @@ MAX_ASSETS_PER_PAGE = 48
 MAX_JSON_ASSETS_PER_PAGE = 10
 MAX_EXTERNAL_ASSETS_PER_PAGE = 8
 MAX_PAGE_LINKS = 24
+DISCOVERY_MAX_RETRIES = 1
+DISCOVERY_TIMEOUT_CAP = 8.0
 
 # Regex to extract inline <script>...</script> content
 INLINE_SCRIPT_RE = re.compile(
@@ -56,7 +58,10 @@ class Crawler:
         self.session = session
         self._visited: set[str] = set()
         self._visited_lock = asyncio.Lock()
-        self._fetch_sem = asyncio.Semaphore(max(4, min(config.concurrency, 12)))
+        self._fetch_sem = asyncio.Semaphore(max(1, config.concurrency))
+
+    def _request_timeout(self) -> float:
+        return min(self.config.timeout, DISCOVERY_TIMEOUT_CAP)
 
     async def _mark_visited(self, url: str) -> bool:
         """Mark a URL as visited. Returns True if it was new."""
@@ -106,6 +111,8 @@ class Crawler:
                 self.client,
                 url,
                 headers={"User-Agent": self._get_ua()},
+                timeout=self._request_timeout(),
+                max_retries=DISCOVERY_MAX_RETRIES,
             )
         except (httpx.HTTPError, Exception):
             return
@@ -199,6 +206,8 @@ class Crawler:
                     self.client,
                     url,
                     headers={"User-Agent": self._get_ua()},
+                    timeout=self._request_timeout(),
+                    max_retries=DISCOVERY_MAX_RETRIES,
                 )
                 if resp is not None and resp.status_code == 200:
                     content_type = resp.headers.get("content-type", "")

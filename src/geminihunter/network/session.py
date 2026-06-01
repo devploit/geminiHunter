@@ -76,7 +76,7 @@ class SessionManager:
             headers={"User-Agent": self._get_user_agent()},
             limits=httpx.Limits(
                 max_connections=self.config.concurrency,
-                max_keepalive_connections=max(1, self.config.concurrency // 2),
+                max_keepalive_connections=max(1, self.config.concurrency),
             ),
         )
         try:

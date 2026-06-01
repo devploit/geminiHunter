@@ -31,6 +31,7 @@ from geminihunter.validation.validator import KeyValidator
 
 logger = logging.getLogger("geminihunter")
 console = Console(stderr=True)
+MAX_SOURCEMAP_CANDIDATES = 64
 
 
 def _status(config: Config, msg: str) -> None:
@@ -221,6 +222,13 @@ class Pipeline:
                 for s in all_sources
                 if s.source_type == SourceType.JS_FILE
             ]
+            js_sources = sorted(
+                js_sources,
+                key=lambda item: (
+                    0 if "sourceMappingURL" in item[1] else 1,
+                    len(item[1]),
+                ),
+            )[:MAX_SOURCEMAP_CANDIDATES]
             sm_done = 0
             total_js = len(js_sources)
             sm_tasks: list = []
@@ -270,17 +278,29 @@ class Pipeline:
         show = not self.config.quiet and not self.config.json_mode
         import hashlib
 
-        total = len(sources)
         deobfuscator = Deobfuscator()
         extractor = KeyExtractor()
+
+        candidate_sources = [
+            source
+            for source in sources
+            if extractor.may_contain_key_material(source.content)
+        ]
+        total = len(candidate_sources)
+        if not candidate_sources:
+            if show:
+                sys.stderr.write("\r" + " " * 100 + "\r")
+                sys.stderr.flush()
+            return []
+
         content_hashes = [
-            hashlib.md5(source.content.encode()).hexdigest() for source in sources
+            hashlib.blake2s(source.content.encode(), digest_size=16).hexdigest()
+            for source in candidate_sources
         ]
         unique_hashes = list(dict.fromkeys(content_hashes))
-        content_by_hash = {
-            content_hash: source.content
-            for content_hash, source in zip(content_hashes, sources)
-        }
+        content_by_hash: dict[str, str] = {}
+        for content_hash, source in zip(content_hashes, candidate_sources):
+            content_by_hash.setdefault(content_hash, source.content)
         total_unique = len(unique_hashes)
 
         def _eprogress(msg: str) -> None:
@@ -306,7 +326,7 @@ class Pipeline:
         processed_by_hash = dict(zip(unique_hashes, processed))
 
         # Extract keys with progress
-        for i, source in enumerate(sources):
+        for i, source in enumerate(candidate_sources):
             extractor.extract_from_source(source, processed_by_hash[content_hashes[i]])
             if (i + 1) % max(1, total // 20) == 0:
                 _eprogress(f"Extracting... {i + 1}/{total} | {extractor.count} keys")
