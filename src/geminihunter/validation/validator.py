@@ -219,7 +219,7 @@ class KeyValidator:
 
             return ValidatedKey(
                 key=key.key,
-                status=KeyStatus.INVALID,
+                status=KeyStatus.INVALID if status_code in (400, 401) else KeyStatus.UNKNOWN,
                 initial_status_code=status_code,
                 target_domain=key.target_domain,
                 sources=key.sources,

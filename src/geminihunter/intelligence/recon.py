@@ -10,7 +10,7 @@ import httpx
 from geminihunter.config import Config
 from geminihunter.models import KeyIntelligence, KeyRestrictions, KeyStatus, ValidatedKey
 from geminihunter.network.session import SessionManager
-from geminihunter.validation.bypass import GEMINI_BASE_URL
+from geminihunter.validation.bypass import GEMINI_BASE_URL, google_error_reason
 
 logger = logging.getLogger("geminihunter")
 
@@ -229,7 +229,8 @@ class KeyRecon:
         """
         Probe billing status by attempting a generation request.
 
-        If the key can generate content, billing is likely active.
+        Generation can use free quota, so success does not prove paid billing.
+        Only report disabled billing when the API explicitly identifies it.
         Also extracts quota info from response headers.
         """
         url = self._build_url(
@@ -259,17 +260,8 @@ class KeyRecon:
             quota_remaining = None
             quota_limit = None
 
-            if resp.status_code == 200:
-                billing_enabled = True
-            elif resp.status_code == 429:
-                # Rate limited but key works -- billing is active, just quota exhausted
-                billing_enabled = True
-            elif resp.status_code == 403:
-                text = resp.text
-                if "BILLING" in text.upper() or "billing" in text:
-                    billing_enabled = False
-                elif "QUOTA" in text.upper():
-                    billing_enabled = True  # Has billing, just out of quota
+            if resp.status_code == 403 and google_error_reason(resp) == "BILLING_DISABLED":
+                billing_enabled = False
 
             # Check quota headers
             for header in resp.headers:
@@ -298,7 +290,7 @@ class KeyRecon:
         For VALID keys: probe with a bogus Referer to confirm no restrictions.
         For BYPASSED keys: infer restriction type from the bypass technique.
         """
-        r = KeyRestrictions()
+        r = KeyRestrictions(restriction_type="unknown")
 
         if key.status == KeyStatus.VALID:
             # Key works with bare request -- test if a wrong Referer breaks it
@@ -311,16 +303,13 @@ class KeyRecon:
                     retry_on_429=False,
                 )
                 if resp is not None and resp.status_code == 200:
-                    # Works with any Referer → no referrer restriction
-                    r.unrestricted = True
-                    r.restriction_type = "none"
-                else:
-                    # Bare request works but wrong Referer fails → odd, but not restricted
-                    r.unrestricted = True
-                    r.restriction_type = "none"
+                    # A request from one IP cannot rule out IP or API restrictions.
+                    r.restriction_type = "no_referrer_restriction_observed"
+                elif resp is not None and google_error_reason(resp) == "API_KEY_HTTP_REFERRER_BLOCKED":
+                    r.referrer_restricted = True
+                    r.restriction_type = "http_referrer"
             except httpx.HTTPError:
-                r.unrestricted = True
-                r.restriction_type = "none"
+                return r
 
         elif key.status == KeyStatus.BYPASSED and key.bypass:
             technique = key.bypass.technique.lower()

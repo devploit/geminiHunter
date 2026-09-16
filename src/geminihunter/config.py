@@ -1,5 +1,6 @@
 """Global configuration dataclass."""
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -37,6 +38,29 @@ class Config:
     quiet: bool = False
     evidence: bool = False
     output_path: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, minimum in (("depth", 0), ("concurrency", 1)):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        for name in ("rate_limit", "timeout", "delay"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                or (name != "delay" and value == 0)
+            ):
+                bound = ">= 0" if name == "delay" else "> 0"
+                raise ValueError(f"{name.replace('_', '-')} must be finite and {bound}")
+
+    @property
+    def writes_json(self) -> bool:
+        return self.json_mode or bool(
+            self.output_path and self.output_path.lower().endswith(".json")
+        )
 
     @property
     def is_key_mode(self) -> bool:

@@ -1,9 +1,9 @@
-import sys
-from pathlib import Path
+import pytest
+import respx
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+@pytest.fixture(autouse=True)
+def mock_http():
+    """Never send real HTTP requests from the test suite."""
+    with respx.mock(assert_all_called=False, assert_all_mocked=True) as router:
+        yield router

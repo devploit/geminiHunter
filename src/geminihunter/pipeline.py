@@ -1,5 +1,6 @@
 """Pipeline orchestrator -- wires all stages together."""
 
+import io
 import logging
 import sys
 import time
@@ -72,7 +73,20 @@ class Pipeline:
 
         if not extracted:
             _status(self.config, "  [dim]No API keys found.[/dim]")
-            return self._build_result([], [], sources_crawled, start, timings)
+            result = self._build_result([], [], sources_crawled, start, timings)
+            self._render(result)
+            return result
+
+        unique: dict[str, ExtractedKey] = {}
+        for key in extracted:
+            if key.key not in unique:
+                unique[key.key] = key
+                continue
+            existing = unique[key.key]
+            existing.sources = list(dict.fromkeys(existing.sources + key.sources))
+            existing.source_types = list(dict.fromkeys(existing.source_types + key.source_types))
+            existing.target_domains = list(dict.fromkeys(existing.target_domains + key.target_domains))
+        extracted = list(unique.values())
 
         _status(self.config, f"  [green]+[/green] Found [bold]{len(extracted)}[/bold] unique key(s)\n")
 
@@ -102,7 +116,7 @@ class Pipeline:
         all_results = intel + non_working
 
         # Always generate curls for JSON mode, or when --evidence is set
-        if self.config.evidence or self.config.json_mode:
+        if self.config.evidence or self.config.writes_json:
             for r in all_results:
                 r.curl_commands = generate_curl_commands(r)
 
@@ -389,7 +403,7 @@ class Pipeline:
         timings: dict[str, float] | None = None,
     ) -> ScanResult:
         return ScanResult(
-            targets_scanned=self.config.targets or ["direct_key_check"],
+            targets_scanned=(self.config.targets + self.config.apk_paths) or ["direct_key_check"],
             sources_crawled=sources_crawled,
             keys_found=len(validated),
             keys_valid=sum(1 for r in results if r.status == KeyStatus.VALID),
@@ -403,24 +417,19 @@ class Pipeline:
         )
 
     def _render(self, result: ScanResult) -> None:
-        if self.config.json_mode:
+        if self.config.writes_json:
             output = render_json(result)
+        elif self.config.output_path:
+            output = render_table(
+                result, self.config,
+                Console(file=io.StringIO(), record=True, force_terminal=False, color_system=None),
+            )
         else:
             output = render_table(result, self.config)
 
         if self.config.output_path:
-            with open(self.config.output_path, "w") as f:
-                if self.config.json_mode:
-                    f.write(output)
-                else:
-                    from rich.console import Console as RichConsole
-
-                    file_console = RichConsole(
-                        record=True,
-                        force_terminal=False,
-                        color_system=None,
-                    )
-                    f.write(render_table(result, self.config, file_console))
+            with open(self.config.output_path, "w", encoding="utf-8") as f:
+                f.write(output)
             if not self.config.quiet:
                 console.print(f"  [dim]Results written to {self.config.output_path}[/dim]")
         elif self.config.json_mode:

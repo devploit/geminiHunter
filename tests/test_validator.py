@@ -54,7 +54,7 @@ async def test_validator_revalidates_429_bypass(monkeypatch):
     result = await validator.validate_all(
         [
             ExtractedKey(
-                key="AIzaSy123456789012345678901234567890123",
+                key="synthetic-key",
                 sources=["https://example.com/app.js"],
                 source_types=[SourceType.JS_FILE],
                 target_domain="example.com",
@@ -108,7 +108,7 @@ async def test_validator_reports_referrer_progress_when_service_disabled():
     result = await validator.validate_all(
         [
             ExtractedKey(
-                key="AIzaSy123456789012345678901234567890123",
+                key="synthetic-key",
                 sources=["https://example.com/app.js"],
                 source_types=[SourceType.JS_FILE],
                 target_domain="example.com",
@@ -144,7 +144,7 @@ async def test_validator_runs_bypass_once_with_all_candidate_domains():
     result = await validator.validate_all(
         [
             ExtractedKey(
-                key="AIzaSy123456789012345678901234567890123",
+                key="synthetic-key",
                 sources=["https://a.example.com/app.js"],
                 source_types=[SourceType.JS_FILE],
                 target_domain="example.com",
@@ -161,3 +161,15 @@ async def test_validator_runs_bypass_once_with_all_candidate_domains():
         "example.com",
     ]
     assert result[0].status == KeyStatus.FORBIDDEN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 404, 500, 503])
+async def test_unexpected_endpoint_response_is_not_an_invalid_key(status):
+    class FakeSession:
+        async def fetch(self, *args, **kwargs):
+            return DummyResponse(status)
+
+    validator = KeyValidator(object(), Config(bypass=False), FakeSession())
+    results = await validator.validate_all([ExtractedKey(key="synthetic-key")])
+    assert results[0].status == KeyStatus.UNKNOWN

@@ -27,7 +27,7 @@ SPLIT_KEY_ARRAY_JOIN = re.compile(
 # Reverse pattern: key stored reversed
 # "76543210ZYXWVUTSRQPONMLKJIHGFEDCBA" reversed starts with AIzaSy
 REVERSE_KEY_RE = re.compile(
-    r"""["']([a-zA-Z0-9_-]{33}ySzIA)["']""",
+    r"""["']([a-zA-Z0-9_-]{33}ySazIA)["']""",
 )
 
 # --- New patterns ---

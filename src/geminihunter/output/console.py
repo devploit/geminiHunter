@@ -1,6 +1,7 @@
 """Rich terminal output for scan results."""
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -88,9 +89,9 @@ def render_table(
         # Source URLs (full, never truncated)
         sources = [s for s in r.sources if s != "direct_input"]
         if sources:
-            target_console.print(f"  [dim]found in:[/dim] [blue]{sources[0]}[/blue]")
+            target_console.print(f"  [dim]found in:[/dim] [blue]{escape(sources[0])}[/blue]")
             for s in sources[1:3]:
-                target_console.print(f"           [dim]{s}[/dim]")
+                target_console.print(f"           [dim]{escape(s)}[/dim]")
             if len(sources) > 3:
                 target_console.print(f"           [dim]+{len(sources) - 3} more[/dim]")
 
@@ -118,15 +119,15 @@ def _print_key_detail(
     """Print detailed panel for a working key."""
     lines: list[str] = []
 
-    lines.append(f"  [bold cyan]Key[/bold cyan]      {r.key}")
+    lines.append(f"  [bold cyan]Key[/bold cyan]      {escape(r.key)}")
 
     if r.target_domain and r.target_domain != "direct":
-        lines.append(f"  [bold cyan]Domain[/bold cyan]   {r.target_domain}")
+        lines.append(f"  [bold cyan]Domain[/bold cyan]   {escape(r.target_domain)}")
 
     if r.sources and r.sources != ["direct_input"]:
-        lines.append(f"  [bold cyan]Source[/bold cyan]   {r.sources[0]}")
+        lines.append(f"  [bold cyan]Source[/bold cyan]   {escape(r.sources[0])}")
         for src in r.sources[1:3]:
-            lines.append(f"           {src}")
+            lines.append(f"           {escape(src)}")
         if len(r.sources) > 3:
             lines.append(f"           [dim]+{len(r.sources) - 3} more[/dim]")
 
@@ -135,37 +136,37 @@ def _print_key_detail(
         code_label, code_style = BYPASS_CODE_LABEL.get(code, (str(code), "yellow"))
         if code == 403 and r.bypass.error_reason == "SERVICE_DISABLED":
             code_label, code_style = "403 Service disabled", "yellow"
-        lines.append(f"  [bold cyan]Bypass[/bold cyan]   {r.bypass.technique}")
+        lines.append(f"  [bold cyan]Bypass[/bold cyan]   {escape(r.bypass.technique)}")
         lines.append(f"  [bold cyan]Status[/bold cyan]   403 → [{code_style}]{code_label}[/{code_style}]")
         if r.bypass.error_reason:
-            lines.append(f"  [bold cyan]Reason[/bold cyan]   {r.bypass.error_reason}")
+            lines.append(f"  [bold cyan]Reason[/bold cyan]   {escape(r.bypass.error_reason)}")
         for k, v in r.bypass.headers.items():
-            lines.append(f"           [dim]{k}: {v}[/dim]")
+            lines.append(f"           [dim]{escape(k)}: {escape(v)}[/dim]")
 
     if r.project_id or r.project_name:
         project_str = r.project_id or ""
         if r.project_name:
             project_str = f"{r.project_name} ({r.project_id})" if r.project_id else r.project_name
-        lines.append(f"  [bold cyan]Project[/bold cyan]  {project_str}")
+        lines.append(f"  [bold cyan]Project[/bold cyan]  {escape(project_str)}")
 
     if r.billing_enabled is not None:
         billing = "[green]Active[/green]" if r.billing_enabled else "[red]Inactive[/red]"
         lines.append(f"  [bold cyan]Billing[/bold cyan]  {billing}")
 
     if r.detail:
-        lines.append(f"  [bold cyan]Detail[/bold cyan]   {r.detail}")
+        lines.append(f"  [bold cyan]Detail[/bold cyan]   {escape(r.detail)}")
 
     if r.available_models:
         lines.append(f"  [bold cyan]Models[/bold cyan]   {len(r.available_models)} available")
         for m in r.available_models[:5]:
-            lines.append(f"           [dim]{m}[/dim]")
+            lines.append(f"           [dim]{escape(m)}[/dim]")
         if len(r.available_models) > 5:
             lines.append(f"           [dim]+{len(r.available_models) - 5} more[/dim]")
 
     if r.tuned_models:
         lines.append(f"  [bold cyan]Tuned[/bold cyan]    [bold red]{len(r.tuned_models)} fine-tuned model(s)[/bold red]")
         for m in r.tuned_models[:5]:
-            lines.append(f"           [red]{m}[/red]")
+            lines.append(f"           [red]{escape(m)}[/red]")
         if len(r.tuned_models) > 5:
             lines.append(f"           [dim]+{len(r.tuned_models) - 5} more[/dim]")
 
@@ -176,11 +177,13 @@ def _print_key_detail(
         elif rx.referrer_restricted:
             lines.append("  [bold cyan]Restrict[/bold cyan] HTTP Referrer")
             if rx.referrer_pattern:
-                lines.append(f"           [dim]pattern: {rx.referrer_pattern}[/dim]")
+                lines.append(f"           [dim]pattern: {escape(rx.referrer_pattern)}[/dim]")
         elif rx.restriction_type == "application":
             lines.append("  [bold cyan]Restrict[/bold cyan] Application (query param blocked, header works)")
+        elif rx.restriction_type == "no_referrer_restriction_observed":
+            lines.append("  [bold cyan]Restrict[/bold cyan] No referrer restriction observed")
         elif rx.restriction_type:
-            lines.append(f"  [bold cyan]Restrict[/bold cyan] {rx.restriction_type}")
+            lines.append(f"  [bold cyan]Restrict[/bold cyan] {escape(rx.restriction_type)}")
 
     if r.quota_remaining is not None:
         lines.append(f"  [bold cyan]Quota[/bold cyan]    {r.quota_remaining}/{r.quota_limit or '?'}")
@@ -200,4 +203,4 @@ def _print_key_detail(
     if config.evidence and r.curl_commands:
         target_console.print("  [bold cyan]PoC curls:[/bold cyan]")
         for cmd in r.curl_commands:
-            target_console.print(f"  [dim]{cmd}[/dim]\n")
+            target_console.print(f"  {cmd}\n", style="dim", markup=False, soft_wrap=True)

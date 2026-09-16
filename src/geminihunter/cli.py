@@ -1,9 +1,11 @@
 """CLI entry point for geminiHunter."""
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import tomllib
 
 import click
 from rich.console import Console
@@ -17,22 +19,19 @@ console = Console(stderr=True)
 # --- Config file loader ---
 
 CONFIG_FILENAMES = [".geminihunterrc", ".geminihunter.toml"]
-CONFIG_SEARCH = [os.getcwd(), os.path.expanduser("~")]
 
 
 def _load_config_file() -> dict:
     """Load defaults from .geminihunterrc or .geminihunter.toml."""
-    for directory in CONFIG_SEARCH:
+    for directory in (os.getcwd(), os.path.expanduser("~")):
         for name in CONFIG_FILENAMES:
             path = os.path.join(directory, name)
             if os.path.isfile(path):
                 try:
-                    import tomllib
-
                     with open(path, "rb") as f:
                         return tomllib.load(f)
-                except Exception:
-                    return {}
+                except (OSError, tomllib.TOMLDecodeError) as exc:
+                    raise click.UsageError(f"Cannot read configuration {path}: {exc}") from exc
     return {}
 
 BANNER = r"""
@@ -68,23 +67,38 @@ def _collect_targets(
     scan_json: str | None = None,
 ) -> list[str]:
     """Collect and deduplicate targets from all input sources."""
-    import json
-
     targets: list[str] = list(cli_targets)
 
     if target_file:
-        with open(target_file) as f:
+        with open(target_file, encoding="utf-8") as f:
             targets.extend(
                 line.strip()
                 for line in f
-                if line.strip() and not line.startswith("#")
+                if line.strip() and not line.lstrip().startswith("#")
             )
 
     # Import from scan JSON (gengar-style format)
     # Prefer services[] (httpx-probed URLs) over raw subdomains[]
     if scan_json:
-        with open(scan_json) as f:
+        with open(scan_json, encoding="utf-8") as f:
             data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise click.UsageError("Scan JSON must contain an object")
+        for field, item_field in (("services", "url"), ("subdomains", "domain")):
+            entries = data.get(field, [])
+            if not isinstance(entries, list) or any(
+                not isinstance(entry, dict)
+                or not isinstance(entry.get(item_field, ""), str)
+                or (field == "services" and not isinstance(entry.get("host", ""), str))
+                for entry in entries
+            ):
+                raise click.UsageError(f"Scan JSON {field} must contain objects with string fields")
+        scan = data.get("scan", {})
+        if not isinstance(scan, dict) or not isinstance(scan.get("targets", []), list) or any(
+            not isinstance(target, str) for target in scan.get("targets", [])
+        ):
+            raise click.UsageError("Scan JSON scan.targets must be an array of strings")
 
         services = data.get("services", [])
         if services:
@@ -118,7 +132,7 @@ def _collect_targets(
         targets.extend(
             line.strip()
             for line in sys.stdin
-            if line.strip() and not line.startswith("#")
+            if line.strip() and not line.lstrip().startswith("#")
         )
 
     seen: set[str] = set()
@@ -141,17 +155,17 @@ def _collect_keys(key_input: str | None, key_file: str | None) -> list[str]:
                 keys.extend(
                     line.strip()
                     for line in sys.stdin
-                    if line.strip() and not line.startswith("#")
+                    if line.strip() and not line.lstrip().startswith("#")
                 )
         else:
             keys.extend(k.strip() for k in key_input.split(",") if k.strip())
 
     if key_file:
-        with open(key_file) as f:
+        with open(key_file, encoding="utf-8") as f:
             keys.extend(
                 line.strip()
                 for line in f
-                if line.strip() and not line.startswith("#")
+                if line.strip() and not line.lstrip().startswith("#")
             )
 
     return list(dict.fromkeys(keys))  # Dedup preserving order
@@ -159,12 +173,12 @@ def _collect_keys(key_input: str | None, key_file: str | None) -> list[str]:
 
 @click.command()
 @click.argument("targets", nargs=-1)
-@click.option("-f", "--file", "target_file", type=click.Path(exists=True), help="File with targets (one per line)")
-@click.option("-sj", "--scan-json", type=click.Path(exists=True), help="Scan JSON file (gengar-style: extracts subdomains)")
+@click.option("-f", "--file", "target_file", type=click.Path(exists=True, dir_okay=False, readable=True), help="File with targets (one per line)")
+@click.option("-sj", "--scan-json", type=click.Path(exists=True, dir_okay=False, readable=True), help="Scan JSON file (gengar-style: extracts subdomains)")
 @click.option("-k", "--key", "key_input", default=None, help="API key(s) to check directly (comma-separated, or - for stdin)")
-@click.option("--key-file", type=click.Path(exists=True), help="File with API keys (one per line)")
-@click.option("--apk", "apk_files", multiple=True, type=click.Path(exists=True), help="APK/XAPK file(s) to decompile and scan")
-@click.option("--depth", default=2, type=int, show_default=True, help="Crawl depth")
+@click.option("--key-file", type=click.Path(exists=True, dir_okay=False, readable=True), help="File with API keys (one per line)")
+@click.option("--apk", "apk_files", multiple=True, type=click.Path(exists=True, dir_okay=False, readable=True), help="APK/XAPK file(s) to decompile and scan")
+@click.option("--depth", default=2, type=click.IntRange(min=0), show_default=True, help="Crawl depth")
 @click.option("--wayback/--no-wayback", default=True, show_default=True, help="Include Wayback Machine JS")
 @click.option("--sourcemaps/--no-sourcemaps", default=True, show_default=True, help="Chase .js.map files")
 @click.option("--bypass/--no-bypass", default=True, show_default=True, help="Run 403 bypass engine")
@@ -172,10 +186,10 @@ def _collect_keys(key_input: str | None, key_file: str | None) -> list[str]:
 @click.option("--rate-limit", default=10.0, type=float, show_default=True, help="Max requests/second")
 @click.option("--delay", default=0.0, type=float, show_default=True, help="Fixed delay between requests (seconds)")
 @click.option("--timeout", default=15.0, type=float, show_default=True, help="HTTP timeout (seconds)")
-@click.option("--concurrency", default=20, type=int, show_default=True, help="Max concurrent requests")
+@click.option("--concurrency", default=20, type=click.IntRange(min=1), show_default=True, help="Max concurrent requests")
 @click.option("--user-agent", default="rotate", show_default=True, help='Custom User-Agent or "rotate"')
 @click.option("--insecure", is_flag=True, help="Disable TLS certificate verification")
-@click.option("-o", "--output", "output_path", type=click.Path(), help="Write results to file")
+@click.option("-o", "--output", "output_path", type=click.Path(dir_okay=False), help="Write results to file (.json selects JSON)")
 @click.option("--json", "json_mode", is_flag=True, help="Output as JSON")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 @click.option("-q", "--quiet", is_flag=True, help="Suppress banner and progress")
@@ -210,13 +224,25 @@ def main(
     # Apply config file defaults for options not explicitly set on CLI
     file_cfg = _load_config_file()
     ctx = click.get_current_context()
+    supported = {
+        "depth", "wayback", "sourcemaps", "bypass", "proxy", "rate-limit",
+        "delay", "timeout", "concurrency", "user-agent", "insecure", "evidence",
+    }
+    unknown = file_cfg.keys() - supported
+    if unknown:
+        raise click.UsageError(f"Unknown configuration option(s): {', '.join(sorted(unknown))}")
 
     def _cfg(param_name: str, cli_val, toml_key: str | None = None):
         """Return CLI value if explicitly set, otherwise config file value, otherwise CLI default."""
         src = ctx.get_parameter_source(param_name)
         if src != click.core.ParameterSource.DEFAULT:
             return cli_val
-        return file_cfg.get(toml_key or param_name, cli_val)
+        config_key = toml_key or param_name
+        if config_key not in file_cfg:
+            return cli_val
+        value = file_cfg[config_key]
+        parameter = next(p for p in ctx.command.params if p.name == param_name)
+        return parameter.type.convert(value, parameter, ctx)
 
     depth = _cfg("depth", depth)
     wayback = _cfg("wayback", wayback)
@@ -236,9 +262,12 @@ def main(
     if not quiet and not json_mode:
         console.print(BANNER, style="bold cyan")
 
-    keys = _collect_keys(key_input, key_file)
-    apk_paths = list(apk_files)
-    all_targets = _collect_targets(targets, target_file, scan_json)
+    try:
+        keys = _collect_keys(key_input, key_file)
+        apk_paths = list(apk_files)
+        all_targets = _collect_targets(targets, target_file, scan_json)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise click.UsageError(f"Cannot read input: {exc}") from exc
 
     if not keys and not all_targets and not apk_paths:
         console.print("[red]No targets, keys, or APK files provided. Use --help for usage.[/red]")
@@ -263,30 +292,35 @@ def main(
             console.print(f"  [dim]Targets:[/dim] {len(all_targets)}")
         console.print()
 
-    config = Config(
-        targets=all_targets,
-        keys=keys,
-        apk_paths=apk_paths,
-        depth=depth,
-        wayback=wayback,
-        sourcemaps=sourcemaps,
-        bypass=bypass,
-        proxy=proxy,
-        rate_limit=rate_limit,
-        delay=delay,
-        timeout=timeout,
-        concurrency=concurrency,
-        user_agent=user_agent,
-        insecure=insecure,
-        json_mode=json_mode,
-        verbose=verbose,
-        quiet=quiet,
-        evidence=evidence,
-        output_path=output_path,
-    )
+    try:
+        config = Config(
+            targets=all_targets,
+            keys=keys,
+            apk_paths=apk_paths,
+            depth=depth,
+            wayback=wayback,
+            sourcemaps=sourcemaps,
+            bypass=bypass,
+            proxy=proxy,
+            rate_limit=rate_limit,
+            delay=delay,
+            timeout=timeout,
+            concurrency=concurrency,
+            user_agent=user_agent,
+            insecure=insecure,
+            json_mode=json_mode,
+            verbose=verbose,
+            quiet=quiet,
+            evidence=evidence,
+            output_path=output_path,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     try:
         result = asyncio.run(Pipeline(config).execute())
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"Scan failed: {exc}") from exc
     except KeyboardInterrupt:
         console.print("\n  [dim]Interrupted.[/dim]")
         raise SystemExit(130)

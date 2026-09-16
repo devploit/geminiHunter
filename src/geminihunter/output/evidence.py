@@ -1,5 +1,7 @@
 """Evidence generation -- curl commands to reproduce findings."""
 
+import shlex
+
 from geminihunter.models import KeyIntelligence, KeyStatus
 from geminihunter.validation.bypass import GEMINI_BASE_URL
 
@@ -13,12 +15,12 @@ def _build_curl(
     """Build a multi-line curl command with \\ continuations."""
     parts = ["curl -s"]
     if method != "GET":
-        parts.append(f"-X {method}")
+        parts.append(f"-X {shlex.quote(method)}")
     for k, v in (headers or {}).items():
-        parts.append(f"-H '{k}: {v}'")
+        parts.append(f"-H {shlex.quote(f'{k}: {v}')}")
     if body:
-        parts.append(f"-d '{body}'")
-    parts.append(f"'{url}'")
+        parts.append(f"-d {shlex.quote(body)}")
+    parts.append(shlex.quote(url))
     return " \\\n  ".join(parts)
 
 

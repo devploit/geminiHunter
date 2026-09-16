@@ -5,6 +5,8 @@ import logging
 import os
 import random
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
@@ -15,6 +17,22 @@ from geminihunter.network.ratelimit import RateLimiter
 from geminihunter.network.transport import TransportIssue, classify_transport_error
 
 logger = logging.getLogger("geminihunter")
+
+
+def _retry_after(value: str) -> float:
+    """Accept delta seconds or HTTP dates without allowing unbounded waits."""
+    try:
+        seconds = float(int(value))
+    except (ValueError, OverflowError):
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            seconds = (date - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            seconds = 30.0
+    return max(0.0, min(seconds, 60.0))
+
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -115,19 +133,21 @@ class SessionManager:
         host = parsed.hostname
         if host and (parsed.scheme, host) in self._host_failures:
             return None
-        await self.rate_limiter.acquire()
-
         for attempt in range(max_retries):
+            await self.rate_limiter.acquire()
+            last_attempt = attempt == max_retries - 1
             try:
                 if self.config.delay > 0:
                     await asyncio.sleep(self.config.delay)
 
-                kwargs: dict = {"headers": headers or {}}
+                kwargs: dict = {"headers": dict(headers or {})}
                 if data is not None:
                     kwargs["content"] = data
 
                 # Rotate UA per request if configured
-                if self.config.user_agent == "rotate":
+                if self.config.user_agent == "rotate" and not any(
+                    name.lower() == "user-agent" for name in kwargs["headers"]
+                ):
                     kwargs["headers"]["User-Agent"] = self._get_user_agent()
 
                 resp = await client.request(
@@ -139,14 +159,16 @@ class SessionManager:
                 )
 
                 if resp.status_code == 429:
-                    if not retry_on_429:
+                    if not retry_on_429 or last_attempt:
                         return resp
-                    wait = int(resp.headers.get("Retry-After", "30"))
+                    wait = _retry_after(resp.headers.get("Retry-After", "30"))
                     logger.debug(f"Rate limited on {url}, waiting {wait}s")
                     await asyncio.sleep(wait)
                     continue
 
                 if resp.status_code >= 500:
+                    if last_attempt:
+                        return resp
                     wait = 2**attempt + random.random()
                     logger.debug(
                         f"Server error {resp.status_code} on {url}, retry in {wait:.1f}s"
@@ -160,8 +182,8 @@ class SessionManager:
             except httpx.HTTPError as e:
                 issue = classify_transport_error(e)
                 self._remember_issue(url, issue)
-                if not issue.retryable:
-                    logger.debug(f"Non-retryable {issue.kind} error on {url}: {issue.detail}")
+                if not issue.retryable or last_attempt:
+                    logger.debug(f"Stopping after {issue.kind} error on {url}: {issue.detail}")
                     return None
                 wait = 2**attempt + random.random()
                 logger.debug(f"Network error on {url}: {e}, retry in {wait:.1f}s")

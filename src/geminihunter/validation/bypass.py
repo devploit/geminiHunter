@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import shlex
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import ClassVar
@@ -41,12 +42,12 @@ class BypassAttempt:
     def to_curl(self, key: str) -> str:
         """Generate a curl command that reproduces this attempt."""
         url = self.to_url(key)
-        parts = [f"curl -s -X {self.method}"]
+        parts = [f"curl -s -X {shlex.quote(self.method)}"]
         for k, v in self.headers.items():
-            parts.append(f'-H "{k}: {v}"')
+            parts.append(f"-H {shlex.quote(f'{k}: {v}')}")
         if self.body:
-            parts.append(f"-d '{self.body}'")
-        parts.append(f'"{url}"')
+            parts.append(f"-d {shlex.quote(self.body)}")
+        parts.append(shlex.quote(url))
         return " ".join(parts)
 
     def to_bypass_detail(self) -> BypassDetail:
@@ -571,7 +572,9 @@ def google_error_reason(resp: httpx.Response) -> str | None:
     except ValueError:
         return None
 
-    details = payload.get("error", {}).get("details", [])
+    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+        return None
+    details = payload["error"].get("details", [])
     if not isinstance(details, list):
         return None
 
