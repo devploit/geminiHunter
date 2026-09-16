@@ -1,0 +1,5 @@
+# Reviewed synthetic numeric keys in historical validator tests, not credentials.
+# Each exception is limited to a single historical finding; new findings still fail.
+1012d67b9903385123c2cc493e6aa1eb8954e10c:tests/test_validator.py:generic-api-key:147
+ce80d3bd24be1e74423d30cfe62822d4b4daec03:tests/test_validator.py:generic-api-key:111
+2879c3683854559dc8f9efb276f5bd49662b971f:tests/test_validator.py:generic-api-key:51

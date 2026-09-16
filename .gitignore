@@ -14,3 +14,20 @@ env/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+
+# Local scan inputs, credentials, and reports
+.env.*
+!.env.example
+.geminihunterrc
+.geminihunter.toml
+*.apk
+*.xapk
+results*.json
+results*.txt
+reports/
+
+# Test and packaging artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

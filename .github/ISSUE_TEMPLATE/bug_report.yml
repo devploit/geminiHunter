@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible problem using synthetic data.
+body:
+  - type: markdown
+    attributes:
+      value: Do not include real API keys, private targets, APKs, or unredacted scan output. See SECURITY.md for sensitive reports.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include geminihunter --version, python --version, operating system, and installation method.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal command and synthetic input.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include the exit code and sanitized error output.
+    validations:
+      required: true

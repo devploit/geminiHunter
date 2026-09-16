@@ -5,455 +5,193 @@
 <h1 align="center">geminiHunter</h1>
 
 <p align="center">
-  <b>Discover, validate, and bypass Google Gemini API keys from web targets and Android apps</b>
+  Find and assess exposed Google Gemini API keys in web assets and Android apps.
 </p>
 
 <p align="center">
-  <a href="https://github.com/devploit/geminiHunter/releases"><img src="https://img.shields.io/github/v/release/devploit/geminiHunter?style=flat-square" alt="Release"></a>
-  <a href="https://github.com/devploit/geminiHunter/blob/main/LICENSE"><img src="https://img.shields.io/github/license/devploit/geminiHunter?style=flat-square" alt="License"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
-  <a href="https://github.com/devploit/geminiHunter"><img src="https://img.shields.io/github/stars/devploit/geminiHunter?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/devploit/geminiHunter/actions/workflows/ci.yml"><img src="https://github.com/devploit/geminiHunter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11 or later"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> &bull;
-  <a href="#usage">Usage</a> &bull;
-  <a href="#bypass-techniques">Bypass Techniques</a> &bull;
-  <a href="#apk-scanning">APK Scanning</a> &bull;
-  <a href="#integration">Integration</a>
-</p>
+## Overview
 
----
+geminiHunter discovers candidate keys in JavaScript, source maps, archived assets, and APK/XAPK files. It deduplicates findings, validates access to the Gemini API, and reports source locations and observed restrictions. For forbidden keys, an optional bounded bypass engine tests request variations and records the outcome.
 
-## What it does
+- **Web discovery:** HTML scripts, linked JavaScript, JSON manifests, framework assets, source maps, webpack chunks, and Wayback snapshots.
+- **Android discovery:** jadx decompilation when available, with ZIP and binary-string scanning as a fallback.
+- **Extraction:** plain keys, concatenated strings, arrays, template literals, reversed strings, hex escapes, and Base64.
+- **Reporting:** readable terminal output, JSON, and shell-quoted curl evidence.
 
-geminiHunter crawls web targets and decompiles Android apps looking for exposed Google Gemini API keys. When a key returns 403 Forbidden, it runs a probe-based bypass engine that tests candidate referrers, origins, host-forwarding headers, alternate auth placement, API versions, endpoints, and SDK-like client headers within a bounded time budget. For every valid or bypassed key, it gathers intelligence: available models, fine-tuned models, billing status, quota, GCP project info, and key restriction type.
-
-## Quick Start
-
-```bash
-# One-liner install (recommended)
-pipx install git+https://github.com/devploit/geminiHunter.git
-
-# Scan a domain
-geminihunter example.com
-
-# Check a key you already found
-geminihunter -k AIzaSyYOUR_KEY_HERE
-
-# Scan an APK
-geminihunter --apk app.apk
-```
+Use only within an authorized testing scope. This is an active scanner: API validation, bypass probes, and intelligence gathering contact Google, and some probes can generate content and consume quota. Reports and evidence can contain complete credentials. See [SECURITY.md](SECURITY.md).
 
 ## Installation
 
-### Option 1: pipx (recommended)
-
-One command, isolated environment, binary on PATH automatically:
+Requires **Python 3.11+**. Install directly from GitHub with [pipx](https://pipx.pypa.io/):
 
 ```bash
 pipx install git+https://github.com/devploit/geminiHunter.git
+geminihunter --version
 ```
 
-> Don't have pipx? Install it with `pip install pipx && pipx ensurepath` or `brew install pipx`.
-
-Update to latest version:
+Update with `pipx upgrade geminihunter`. Alternatively, install into a virtual environment:
 
 ```bash
-pipx upgrade geminihunter
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install git+https://github.com/devploit/geminiHunter.git
 ```
 
-### Option 2: pip
+On Windows, activate with `.venv\Scripts\Activate.ps1` in PowerShell. The module entry point is also available as `python -m geminihunter`.
+
+For full APK decompilation, install [jadx](https://github.com/skylot/jadx) and make it available on `PATH`. On macOS: `brew install jadx`. Without it, ZIP and binary-string extraction still work.
+
+## Quick start
+
+Replace `example.com` and the local filenames below with inputs you are authorized to test.
 
 ```bash
-pip install git+https://github.com/devploit/geminiHunter.git
+# Discover keys in a web target
+geminihunter example.com
+
+# Check previously collected keys without exposing them in command arguments
+geminihunter --key-file keys.txt
+
+# Scan an Android app
+geminihunter --apk app.apk
+
+# Save a structured report, including an empty report if no keys are found
+geminihunter example.com -o results.json
 ```
-
-### Option 3: From source (development)
-
-```bash
-git clone https://github.com/devploit/geminiHunter.git && cd geminiHunter
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-### Optional: jadx for APK scanning
-
-Install [jadx](https://github.com/skylot/jadx) for full Java source recovery from APKs:
-
-```bash
-# macOS
-brew install jadx
-
-# Linux
-sudo apt install jadx
-```
-
-Without jadx, APK scanning still works using ZIP extraction + binary string extraction from `.dex` and `resources.arsc`. No external tools required.
 
 ## Usage
 
-### Discovery mode -- crawl targets for keys
+### Input
 
 ```bash
-# Single domain
-geminihunter example.com
+# Multiple domains or full HTTP(S) URLs
+geminihunter app.example.com https://example.com/app/
 
-# Multiple domains
-geminihunter app.example.com api.example.com cdn.example.com
+# One target per line; blank lines and # comments are ignored
+geminihunter -f targets.txt
 
-# File with targets (one per line, # comments supported)
-geminihunter -f subdomains.txt
+# Read targets from a pipe
+cat targets.txt | geminihunter --json
 
-# Scan JSON (gengar-style)
-geminihunter -sj scan-results.json
+# Import a gengar-style JSON scan
+geminihunter --scan-json scan.json
 
-# Pipe from recon tools
-subfinder -d example.com | httpx -silent | geminihunter
+# Read keys from stdin instead of targets
+cat keys.txt | geminihunter -k -
 
-# Control crawl depth
-geminihunter example.com --depth 3
-
-# Skip Wayback Machine (faster, less thorough)
-geminihunter example.com --no-wayback
-```
-
-### APK mode -- decompile and scan Android apps
-
-```bash
-# Single APK
-geminihunter --apk app.apk
-
-# XAPK (auto-extracts inner APKs)
+# XAPK bundles and split APKs
 geminihunter --apk app.xapk
-
-# Multiple APKs (split APKs)
 geminihunter --apk base.apk --apk split_config.apk
 
-# APK + web targets (scan both)
-geminihunter --apk app.apk -f subdomains.txt
-
-# APK + additional keys to validate
-geminihunter --apk app.apk -k AIzaSyEXTRA_KEY
+# Combine discovery with existing keys
+geminihunter --apk app.apk -f targets.txt --key-file keys.txt
 ```
 
-### Key-check mode -- validate keys directly
+Scan JSON accepts `services` objects with string `url` and `host` fields, `subdomains` objects with a string `domain`, or `scan.targets` as an array of strings. Services take precedence; HTTPS is preferred for duplicate hosts.
+
+Direct keys can also be supplied with `-k KEY` or `-k KEY1,KEY2`; these values can appear in shell history and process listings. Neither direct key input nor APK input suppresses target stdin: reserve stdin for keys explicitly with `-k -`.
+
+### Discovery and network controls
 
 ```bash
-# Single key
-geminihunter -k AIzaSyYOUR_KEY_HERE
-
-# Multiple keys (comma-separated)
-geminihunter -k key1,key2,key3
-
-# From file
-geminihunter --key-file found_keys.txt
-
-# From stdin
-echo "AIzaSy..." | geminihunter -k -
-
-# Skip bypass attempts (faster)
-geminihunter -k AIzaSy... --no-bypass
+geminihunter example.com --depth 3 --no-wayback
+geminihunter example.com --no-sourcemaps --no-bypass
+geminihunter -f targets.txt --concurrency 5 --rate-limit 2 --delay 0.5
+geminihunter example.com --timeout 20 --proxy http://127.0.0.1:8080
+geminihunter example.com --proxy proxies.txt --user-agent "MyAuthorizedScanner/1.0"
 ```
 
-### Output options
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--depth` | `2` | Maximum page-link depth; `0` includes the initial page and its assets |
+| `--wayback / --no-wayback` | Enabled | Fetch archived JavaScript through Wayback |
+| `--sourcemaps / --no-sourcemaps` | Enabled | Follow source maps |
+| `--bypass / --no-bypass` | Enabled | Try request variations after a 403 response |
+| `--rate-limit` | `10` | Token refill rate per second; permits an initial burst |
+| `--delay` | `0` | Delay before each request, in seconds |
+| `--timeout` | `15` | HTTP timeout; discovery phases use shorter caps |
+| `--concurrency` | `20` | Concurrency setting for pipeline stages and connection pools |
+| `--user-agent` | `rotate` | Rotating user agent, or a fixed custom value |
+| `--insecure` | Disabled | Disable TLS certificate verification |
+
+The concurrency setting is not a strict global in-flight request limit: some stages perform nested probes. Proxies rotate when a session client is created. Retry attempts also consume rate-limit tokens; Retry-After waits are capped at 60 seconds.
+
+Discovery can fetch linked assets on external hosts. Wayback queries expand targets to an inferred parent domain, so review that scope before enabling them. Parent-domain inference is heuristic, not a full public-suffix lookup.
+
+### Output
 
 ```bash
-# JSON output to stdout
+# JSON on stdout; diagnostic output stays on stderr
 geminihunter example.com --json
 
-# Save to file (JSON auto-detected when using -o)
+# File extension selects JSON; other extensions receive a text report
 geminihunter example.com -o results.json
+geminihunter example.com -o results.txt
 
-# Include curl commands to reproduce each finding
+# Include curl evidence in terminal output
 geminihunter example.com --evidence
 
-# Quiet mode (no banner, no progress -- only results)
+# Suppress banner and progress
 geminihunter example.com -q --json
 ```
 
-### OPSEC options
+`--json` always selects JSON, regardless of the output filename. With `-o`, the report goes to the file; without it, JSON goes to stdout and terminal reports go to stderr. JSON includes curl evidence automatically. Existing output files are overwritten.
+
+For the complete option list, run `geminihunter --help`. Add `-v` for diagnostic logs; treat those logs as sensitive.
+
+## Understanding results
+
+| Status | Meaning |
+| --- | --- |
+| `valid` | The initial model-list request returned 200 |
+| `bypassed` | A forbidden key subsequently returned 200 with a recorded request variation |
+| `rate_limited` | A 429 response was observed; a working generation call is not confirmed |
+| `forbidden` | Access remains forbidden, including cases where the error reason changed |
+| `invalid` | Validation returned 400 or 401 |
+| `unknown` | Transport failure or an unexpected endpoint response prevented validation |
+
+A 429 candidate from the bypass engine is rechecked before being labeled `bypassed`. Permission progress from a referrer restriction to `SERVICE_DISABLED` remains `forbidden`. See [bypass behavior and extension points](docs/bypass.md).
+
+For valid and bypassed keys, the tool probes model listings, tuned-model listings, project identifiers, quota headers, and restrictions. These are observations, not a complete cloud-account audit:
+
+- A successful generation request does not establish paid billing: Gemini also offers a [free tier](https://ai.google.dev/gemini-api/docs/billing). `billing_enabled` remains `null` unless a billing-disabled response is explicitly identified.
+- A successful request with an arbitrary referrer cannot rule out IP or API restrictions. The tool records `no_referrer_restriction_observed` instead of declaring the key unrestricted. See [Google's restriction types](https://docs.cloud.google.com/api-keys/docs/add-restrictions-api-keys).
+- Model lists reflect the returned API page; pagination is not currently followed. Tuned-model and quota information may be unavailable. A tuned-model listing does not establish access to training data.
+- Some existing probes use fixed model names and API versions, which may become unavailable. A failed probe is not proof that all model access is blocked.
+
+### JSON and exit codes
+
+Top-level JSON fields include `targets_scanned`, `sources_crawled`, `keys_found`, per-status counts, `duration_seconds`, `phase_timings`, and `results`. Each result includes `key`, `status`, `sources`, `target_domain`, optional `bypass` details, intelligence fields, and `curl_commands`.
 
 ```bash
-# Single proxy
-geminihunter example.com --proxy http://127.0.0.1:8080
+# Print statuses and source locations without printing the keys
+geminihunter -f targets.txt -q --json | jq '.results[] | {status, sources}'
 
-# Proxy rotation (file with proxy URLs, one per line)
-geminihunter -f targets.txt --proxy proxies.txt
-
-# Rate limiting
-geminihunter -f targets.txt --rate-limit 5
-
-# Fixed delay between requests
-geminihunter example.com --delay 0.5
-
-# Custom User-Agent
-geminihunter example.com --user-agent "Mozilla/5.0 (Macintosh; ...)"
-
-# Lower concurrency for stealth
-geminihunter -f targets.txt --concurrency 5 --rate-limit 2
+# Inspect permission progress
+geminihunter --key-file keys.txt --json | jq '.results[] | select(.bypass) | {status, bypass: .bypass.technique, code: .bypass.bypass_status_code}'
 ```
 
-### All options
+| Exit code | Meaning |
+| --- | --- |
+| `0` | At least one valid, bypassed, or rate-limited key |
+| `1` | No such findings, or an operational error reported on stderr |
+| `2` | Invalid arguments, input structure, or configuration |
+| `130` | Interrupted by the user |
 
-```
-Usage: geminihunter [OPTIONS] [TARGETS]...
+A valid JSON report is emitted even when discovery finds no keys. Use the status fields to distinguish confirmed access from rate limiting; exit code 0 alone does not establish unrestricted access.
 
-Options:
-  -f, --file PATH                 File with targets (one per line)
-  -sj, --scan-json PATH          Scan JSON file (gengar-style)
-  -k, --key TEXT                  API key(s) (comma-separated, or - for stdin)
-  --key-file PATH                 File with API keys (one per line)
-  --apk PATH                     APK/XAPK file(s) to decompile and scan
-  --depth INTEGER                 Crawl depth  [default: 2]
-  --wayback / --no-wayback        Include Wayback Machine JS  [default: wayback]
-  --sourcemaps / --no-sourcemaps  Chase .js.map files  [default: sourcemaps]
-  --bypass / --no-bypass          Run 403 bypass engine  [default: bypass]
-  --proxy TEXT                    Proxy URL or file with proxy list
-  --rate-limit FLOAT              Max requests/second  [default: 10.0]
-  --delay FLOAT                   Fixed delay between requests  [default: 0.0]
-  --timeout FLOAT                 HTTP timeout (seconds)  [default: 15.0]
-  --concurrency INTEGER           Max concurrent requests  [default: 20]
-  --user-agent TEXT               Custom User-Agent or "rotate"  [default: rotate]
-  -o, --output PATH               Write results to file
-  --json                          Output as JSON
-  -v, --verbose                   Verbose logging
-  -q, --quiet                     Suppress banner and progress
-  --evidence                      Include curl PoC commands
-  --version                       Show version and exit
-  --help                          Show this message and exit
-```
+## Configuration
 
-## How it works
-
-### Architecture
-
-```
-Target Input                     Key Input                APK Input
-(domains, files, stdin, json)    (--key, --key-file)      (--apk .apk/.xapk)
-         |                              |                         |
-   +-----v--------+                     |                  +------v-------+
-   |  Discovery   |                     |                  |   Decompile  |
-   |  - Crawl     |                     |                  |   jadx/ZIP   |
-   |  - Wayback   |                     |                  +------+-------+
-   |  - Sourcemaps|                     |                         |
-   |  - Webpack   |                     |                  +------v------+
-   |  - Preload   |                     |                  |  Scan files  |
-   +-----+--------+                     |                  |  .java .xml  |
-         |                              |                  |  .dex .arsc  |
-   +-----v--------+                     |                  +------+------+
-   |  Extraction  |                     |                         |
-   |  10 patterns |<----------------------------------------------+
-   |  deobfuscate |
-   |  dedup       |
-   +-----+--------+
-         |
-         +<--- direct keys (--key) ----+
-         |
-   +-----v--------+
-   |  Validation  |  GET /v1beta/models?key=...
-   +-----+--------+
-         |
-    200? +--> VALID
-    403? +--> Bypass Engine (probes + dynamic batches)
-         |      200/429? --> BYPASSED
-         |      403 reason changed? --> FORBIDDEN + bypass metadata
-         |      all fail --> FORBIDDEN
-    4xx? +--> INVALID
-         |
-   +-----v--------+
-   | Intelligence |  (only for VALID / BYPASSED)
-   |  - Models    |  GET /v1beta/models
-   |  - Tuned     |  GET /v1beta/tunedModels
-   |  - Billing   |  POST generateContent
-   |  - Project   |  Error response + headers
-   |  - Restrict  |  Referrer/app restriction probe
-   +-----+--------+
-         |
-   +-----v--------+
-   |    Output    |
-   |  Rich table  |
-   |  JSON        |
-   |  Curl PoCs   |
-   +--------------+
-```
-
-### Discovery sources
-
-| Source | Description |
-|--------|-------------|
-| **HTML inline** | `<script>` tags in crawled HTML pages |
-| **JS files** | External `.js` files referenced by `<script src>`, `<link preload>`, or detected in HTML |
-| **Source maps** | `.js.map` files (via `{url}.map` convention and `sourceMappingURL` comments) |
-| **Webpack chunks** | Lazy-loaded chunks discovered from webpack runtime patterns |
-| **Wayback Machine** | Historical JS snapshots from `web.archive.org` CDX API |
-| **Framework files** | Next.js (`/_next/data/`, `/_next/static/`), Nuxt.js (`/_nuxt/`), Firebase (`/__/firebase/`) |
-| **APK sources** | Decompiled Java/Kotlin, decoded XML resources, `assets/`, binary strings from `.dex` |
-
-### Extraction patterns
-
-Keys are matched using 10 regex patterns that cover common obfuscation techniques:
-
-| Pattern | What it catches | Example |
-|---------|----------------|---------|
-| Direct match | Plain API keys | `"AIzaSyABC...XYZ"` |
-| String concat | Two-part split | `"AIzaSy" + "suffix..."` |
-| Multi-part split | 3+ concatenated parts | `"AIzaSy" + "abc" + "def" + "ghi"` |
-| Array join | Array-based construction | `["AIzaSy","rest"].join("")` |
-| Template literal | JS template syntax | `` `AIzaSy${"suffix"}` `` |
-| Reversed | Key stored backwards | `"...ZYXySzIA"` |
-| Fallback value | Default/fallback assignments | `getEnv() \|\| "AIzaSy..."` |
-| Hex-encoded | Prefix as hex escapes | `"\x41\x49\x7a\x61\x53\x79..."` |
-| Base64-encoded | Full key base64'd | `"QUl6YVN5..."` (decodes to `AIzaSy...`) |
-
-Keys with fewer than 5 unique characters in the suffix are automatically filtered as placeholders.
-
-## Bypass techniques
-
-When a key returns **403 Forbidden**, the active bypass engine does not run a fixed
-"16 strategies / 73 attempts" list. It builds candidate domains and browser
-contexts from the target, source URLs, and Google web origins, then runs
-deduplicated probes and batches until the first useful result or until the
-4-second bypass budget is exhausted.
-
-The real technique names emitted in JSON are dynamic. They use these prefixes:
-
-| Prefix | What it tests |
-|--------|---------------|
-| `probe:browser-ref-models` | Browser-like `Origin` / `Referer` headers against `GET /models` |
-| `probe:header-browser-models` | Same browser-like probe with the key sent through `x-goog-api-key` |
-| `probe:query-generate` | `POST generateContent` with the key in the query string |
-| `probe:query-browser-generate` | Browser-like `POST generateContent` with host-forwarding headers |
-| `common-referer:models:<referer>` | Common hard-coded `Referer` values against `GET /models` |
-| `common-referer:files:<referer>` | Common hard-coded `Referer` values against `GET /files` |
-| `browser:models:<referer>` | Source, target, or Google-derived `Referer` / `Origin` against `GET /models` |
-| `browser:generate:<model>:<referer>` | Browser-like `POST generateContent` for priority Gemini models |
-| `browser:count:<model>:<referer>` | Browser-like `POST countTokens` for priority Gemini models |
-| `origin-only:<domain>` | Target-derived `Origin` and `Referer` only |
-| `host-override:<domain>` | `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Forwarded` override |
-| `host-override-generate:<domain>` | Host override plus `POST generateContent` |
-| `sdk:models:<client>` | SDK-like `X-Goog-Api-Client` or `User-Agent` against `GET /models` |
-| `sdk:generate:<client>` | SDK-like headers plus `POST generateContent` |
-| `endpoint:models:<api_version>` | `GET /models` across supported API versions |
-| `endpoint:generate:<api_version>:<model>` | `POST generateContent` across API versions and priority models |
-| `endpoint:count:<api_version>:<model>` | `POST countTokens` across API versions and priority models |
-| `endpoint:stream:<api_version>` | `POST streamGenerateContent` |
-| `endpoint:embed:<api_version>` | `POST embedContent` |
-
-Candidate contexts include source URL origins, full source URLs as referers,
-target domains, expanded target-domain variants (`app.`, `api.`, `www.`, `m.`),
-and Google web origins such as AI Studio, Cloud Console, `ai.google.dev`,
-MakerSuite, and Google Search. The active engine also tries common standalone
-referers, including raw `127.0.0.1`, `localhost`, localhost URL variants,
-`https://googleapis.com`, and `https://example.com`.
-
-Both **200** and **429** (rate-limited) responses are treated as successful
-bypasses -- 429 confirms the key is accepted, just throttled. A 403 that changes
-from `API_KEY_HTTP_REFERRER_BLOCKED` to another reason such as
-`SERVICE_DISABLED` is recorded as permission progress with
-`bypass_status_code: 403` and `error_reason: "SERVICE_DISABLED"`, but it is not
-counted as a working bypass because the Gemini API call still cannot be used.
-
-## APK scanning
-
-The `--apk` flag accepts `.apk` and `.xapk` files. XAPK files (ZIP bundles containing multiple APKs) are automatically unpacked.
-
-### Decompilation engines
-
-| Engine | Condition | What it scans |
-|--------|-----------|--------------|
-| **jadx** | Auto-detected if `jadx` is in PATH | Full Java/Kotlin source, decoded XML resources, manifests |
-| **ZIP fallback** | No external tools needed | Text files in `assets/`, string extraction from `.dex` and `resources.arsc` |
-
-With jadx, the tool recovers full source code, catching keys built via string concatenation, config classes, BuildConfig fields, and obfuscated constructions. The ZIP fallback extracts ASCII strings >= 39 characters from binary files, which catches any hardcoded full key.
-
-### What it finds inside APKs
-
-- API keys in `assets/` configs (JSON, XML, YAML, properties)
-- Keys in decompiled Java/Kotlin source (string constants, BuildConfig, flavors)
-- Keys in decoded `res/values/strings.xml` (via jadx or `resources.arsc` binary extraction)
-- Keys in bundled web assets (`assets/www/`, hybrid app JS bundles)
-- Keys in Firebase configuration files
-- Base64/hex-obfuscated keys in any of the above
-
-## Key intelligence
-
-For every **valid** or **bypassed** key, geminiHunter gathers:
-
-| Field | Source | Description |
-|-------|--------|-------------|
-| **Available models** | `GET /v1beta/models` | Full list of models the key can access |
-| **Fine-tuned models** | `GET /v1beta/tunedModels` | Custom models (indicates training data exposure) |
-| **GCP Project ID** | Error responses + headers | Numeric project identifier |
-| **Project name** | `x-goog-api-resource-name` header | Human-readable project name |
-| **Billing status** | `POST generateContent` | Whether billing is active (can make real API calls) |
-| **Quota** | Response headers | Remaining and total quota if available |
-| **Restrictions** | Bypass analysis + probing | Detects if the key has referrer, application, or no restrictions |
-
-Fine-tuned models are highlighted in red in the output -- they indicate the organization has uploaded custom training data, which significantly increases the impact of the finding.
-
-Unrestricted keys are flagged in red -- they have no application restrictions (no referrer, IP, or app binding), making them usable from anywhere.
-
-## JSON output
-
-With `--json`, results are written as a structured JSON object:
-
-```json
-{
-  "targets_scanned": ["example.com"],
-  "sources_crawled": 312,
-  "keys_found": 2,
-  "keys_valid": 1,
-  "keys_bypassed": 1,
-  "keys_forbidden": 0,
-  "keys_invalid": 0,
-  "duration_seconds": 4.82,
-  "phase_timings": {
-    "discovery": 2.1,
-    "extraction": 0.3,
-    "validation": 1.8,
-    "intelligence": 0.6
-  },
-  "results": [
-    {
-      "key": "AIzaSy...",
-      "status": "valid",
-      "target_domain": "example.com",
-      "sources": ["https://cdn.example.com/app.js"],
-      "bypass": null,
-      "available_models": ["gemini-2.0-flash", "gemini-2.5-pro", "..."],
-      "tuned_models": [],
-      "project_id": "123456789",
-      "project_name": "my-project",
-      "billing_enabled": true,
-      "quota_remaining": null,
-      "quota_limit": null,
-      "curl_commands": ["curl -s 'https://generativelanguage.googleapis.com/...'"]
-    }
-  ]
-}
-```
-
-Parse with jq:
-
-```bash
-# Extract working keys
-geminihunter -f subs.txt -q --json | jq -r '.results[] | select(.status == "valid" or .status == "bypassed") | .key'
-
-# Count models per key
-geminihunter -k KEY --json | jq '.results[] | {key: .key[0:16], models: (.available_models | length), billing: .billing_enabled}'
-
-# Get bypass or permission-progress technique used
-geminihunter -k KEY --json | jq '.results[] | select(.bypass) | {key: .key[0:16], result: .status, technique: .bypass.technique, code: .bypass.bypass_status_code, reason: .bypass.error_reason}'
-```
-
-## Config file
-
-Create `.geminihunterrc` or `.geminihunter.toml` in the current directory or home directory to set defaults:
+Create `.geminihunterrc` or `.geminihunter.toml` in the working directory or home directory:
 
 ```toml
-# .geminihunter.toml
-depth = 3
+depth = 2
 wayback = true
 sourcemaps = true
 bypass = true
@@ -462,92 +200,37 @@ delay = 0.2
 timeout = 20.0
 concurrency = 10
 user-agent = "rotate"
-evidence = true
+insecure = false
+evidence = false
 ```
 
-CLI arguments always override config file values.
+The first file found is used: working directory before home, and `.geminihunterrc` before `.geminihunter.toml`. Files are not merged. Explicit CLI options override file values. Malformed TOML, unsupported settings, and invalid option values produce an error.
 
-## Integration with recon pipelines
+## APK limits
 
-```bash
-# Full recon chain: subfinder -> httpx -> geminiHunter
-subfinder -d target.com -silent | httpx -silent | geminihunter --json -o results.json
+Archive inputs are validated before decompilation or extraction. Unsafe paths and symbolic-link entries are rejected. Each archive is limited to 10,000 entries and 512 MiB of declared uncompressed data; an APK inside an XAPK is limited to 256 MiB. Individual source files above 10 MiB are skipped. XAPK processing extracts nested APKs and reads supported metadata, without unpacking unrelated assets.
 
-# With proxy rotation for stealth
-geminihunter -f targets.txt --proxy proxies.txt --rate-limit 3 --delay 0.5
+jadx runs with a 180-second timeout; unavailable or unsuccessful decompilation falls back to ZIP scanning. These limits are guardrails, not a sandbox for a third-party decompiler.
 
-# Parallel with other key scanners
-geminihunter -f subs.txt -q --json | jq -r '.results[] | select(.status != "invalid") | .key' >> all_keys.txt
+## Development
 
-# APK from app store + full web scan
-geminihunter --apk com.target.app.apk -f subs.txt --evidence --json -o full_report.json
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and package verification. [CHANGELOG.md](CHANGELOG.md) tracks changes.
 
-# Quick key check from clipboard
-pbpaste | geminihunter -k - --no-bypass --json
-```
-
-**Exit codes**: `0` if valid/bypassed keys found, `1` otherwise. Use this in CI/CD or shell conditionals.
-
-## Adding custom bypass attempts
-
-The legacy `@bypass_strategy` registry still exists in
-`src/geminihunter/validation/bypass.py`, but the active `BypassEngine.run()` flow
-uses explicit probe and batch builders. To make a bypass active, add attempts to
-one of these methods:
-
-| Method | Use it for |
-|--------|------------|
-| `_classification_probes` | Cheap first-pass probes that should run before the full batches |
-| `_common_referrer_attempts` | Hard-coded standalone `Referer` values such as localhost variants |
-| `_contextual_referrer_attempts` | Source, target, and Google-derived `Origin` / `Referer` contexts |
-| `_host_override_attempts` | Host and forwarded-host header combinations |
-| `_sdk_attempts` | SDK-like client headers and user agents |
-| `_endpoint_matrix_attempts` | API version, model, and endpoint combinations |
-
-Update this README and add a focused unit test whenever a new active bypass
-family is introduced.
-
-## Project structure
-
-```
+```text
 src/geminihunter/
-  cli.py                    # Click CLI, argument parsing, config file loading
-  config.py                 # Global Config dataclass
-  models.py                 # Pydantic models (SourceType, KeyStatus, ScanResult, etc.)
-  pipeline.py               # Main pipeline orchestrator
-
-  discovery/
-    crawler.py              # Web crawler (HTML, JS, preload, framework files)
-    wayback.py              # Wayback Machine CDX integration
-    sourcemaps.py           # .js.map discovery and sourcesContent extraction
-    webpack.py              # Webpack lazy-loaded chunk finder
-    apk.py                  # APK/XAPK decompilation and scanning
-
-  extraction/
-    patterns.py             # 10 compiled regex patterns
-    extractor.py            # Key extraction and deduplication engine
-    deobfuscator.py         # JS beautification for split key recovery
-
-  validation/
-    validator.py            # Key validation orchestrator
-    bypass.py               # Probe-based bypass engine + legacy strategy registry
-
-  intelligence/
-    recon.py                # Post-validation intelligence gathering
-
-  network/
-    session.py              # httpx client, proxy/UA rotation, retry logic
-    ratelimit.py            # Token-bucket rate limiter
-
-  output/
-    console.py              # Rich terminal table and detail panels
-    json_out.py             # JSON serialization
-    evidence.py             # Curl PoC command generation
+  cli.py              Input, configuration, and exit codes
+  pipeline.py         Discovery → extraction → validation → reporting
+  discovery/          Web, archive, source-map, and APK discovery
+  extraction/         Key patterns and deobfuscation
+  validation/         API validation and bypass orchestration
+  intelligence/       Post-validation probes
+  network/            Sessions, retries, rate limiting, transport errors
+  output/             Terminal, JSON, and curl evidence
 ```
 
-## Disclaimer
+## License
 
-This tool is intended for **authorized security testing and bug bounty programs only**. Always ensure you have explicit permission before testing any target. The author is not responsible for any misuse.
+Licensed under the [MIT License](LICENSE).
 
 ## Author
 
